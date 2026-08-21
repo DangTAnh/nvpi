@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# Claude Code local config
+.claude/
+
+# Go build output
+*.exe
+*.test
+*.out
+
+# Chrome headless bundle (272 MB, fetched via scripts/get-chrome-headless-shell.ps1)
+chrome-headless-shell-win64/
+
+# Runtime artifacts
+nvpi.log
+nvpi.pid

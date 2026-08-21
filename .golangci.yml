@@ -1,0 +1,42 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - gocritic
+    - nilerr
+    - noctx
+    - unconvert
+    - unparam
+    - misspell
+    - usestdlibvars
+    - errorlint
+    - copyloopvar
+  settings:
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+        - style
+    misspell:
+      locale: US
+    errcheck:
+      check-blank: true
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+run:
+  timeout: 5m
