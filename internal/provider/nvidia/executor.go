@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +38,11 @@ type Options struct {
 
 	// PredictURL optionally overrides models.ModelInfo.PredictEndpoint (tests).
 	PredictURL func(models.ModelInfo) string
+
+	// DefaultModel optionally rewrites an unknown requested model to this
+	// registered model before Lookup (e.g. Claude Code's builtin claude-*
+	// names). Empty = strict 400 on unknown models (current behavior).
+	DefaultModel string
 }
 
 // Executor implements coreauth.ProviderExecutor for NVIDIA playground predict.
@@ -49,6 +55,7 @@ type Executor struct {
 	captchaWait  time.Duration
 	pool         *captcha.Pool
 	predictURL   func(models.ModelInfo) string
+	defaultModel string
 
 	beforeInflightWait func()
 	beforeSend         func()
@@ -67,6 +74,7 @@ func NewExecutor(opts Options) *Executor {
 		captchaWait:  opts.CaptchaWait,
 		pool:         opts.Pool,
 		predictURL:   opts.PredictURL,
+		defaultModel: opts.DefaultModel,
 		flagCaptcha:  opts.FlagCaptcha,
 	}
 	if e.httpClient == nil {
@@ -205,6 +213,18 @@ func (e *Executor) preparePayload(req clipexec.Request, opts clipexec.Options, s
 		lookupModel = model
 	}
 	info, err := models.Lookup(lookupModel)
+	if err != nil && e.defaultModel != "" {
+		var uerr *models.ErrUnknownModel
+		if errors.As(err, &uerr) {
+			// -default-model: rewrite unknown names (Claude Code's builtin
+			// claude-*) to the configured fallback before Lookup. Strictly
+			// opt-in; empty flag keeps the strict 400.
+			if nb, berr := setBodyModel(body, e.defaultModel); berr == nil {
+				body = nb
+				info, err = models.Lookup(e.defaultModel)
+			}
+		}
+	}
 	if err != nil {
 		if uerr, ok := err.(*models.ErrUnknownModel); ok {
 			return nil, models.ModelInfo{}, requestErr(http.StatusBadRequest, uerr.Error())
@@ -212,6 +232,16 @@ func (e *Executor) preparePayload(req clipexec.Request, opts clipexec.Options, s
 		return nil, models.ModelInfo{}, err
 	}
 	return body, info, nil
+}
+
+// setBodyModel overwrites the model field in an already-translated chat body.
+func setBodyModel(body []byte, name string) ([]byte, error) {
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, err
+	}
+	raw["model"] = name
+	return json.Marshal(raw)
 }
 
 func forceStreamFlag(body []byte, stream bool) ([]byte, error) {
@@ -234,15 +264,136 @@ func forceStreamFlag(body []byte, stream bool) ([]byte, error) {
 	return json.Marshal(raw)
 }
 
+// effortLadder descends max → none. When the upstream returns 400 because
+// the requested reasoning_effort is unsupported by this model, the executor
+// walks down this ladder one tier at a time (max → xhigh → high → medium →
+// low → none) and retries with a fresh captcha token. Each step consumes one
+// captcha (single-use), so doPredict runs two independent budgets: ladder
+// descents ≤ maxLadderSteps (5 = full walk) and captcha/stale-lease retries
+// ≤ maxCaptchaRetries (2). Worst case 1 + 5 + 2 = 8 upstream sends instead
+// of one bad request draining the whole token pool.
+//
+// ponytail: hardcoded list, not derived from effortRanks, because effortRanks
+// is the *intent* scale (input validation) while this is the *retry* order
+// (what we hand to upstream when our guess was wrong). They overlap but serve
+// different purposes — keep them apart.
+// ponytail: array (not slice) so len(effortLadder)-1 is a constant expression
+// for maxLadderSteps below.
+var effortLadder = [...]string{"max", "xhigh", "high", "medium", "low", "none"}
+
+const (
+	// maxCaptchaRetries bounds stale-lease / invalid-token refetches. A stale
+	// token failing more than twice signals a systemic problem (proxy down,
+	// poisoned pool) — surface 401 instead of draining the pool and starving
+	// concurrent requests.
+	maxCaptchaRetries = 2
+	// maxLadderSteps bounds effort-ladder descents below the starting tier;
+	// len(effortLadder)-1 is the full max→none walk.
+	maxLadderSteps = len(effortLadder) - 1
+)
+
+// effortStartIndex returns the index in effortLadder for the reasoning_effort
+// the caller already encoded in body (or chat_template_kwargs.reasoning_effort
+// / thinking.reasoning_effort). Unknown efforts default to 0 ("max") so we
+// start the ladder from the top — the safest assumption for a misconfigured
+// caller is "they wanted max" and the upstream should walk down.
+func effortStartIndex(body []byte) int {
+	s := bodyCurrentEffort(body)
+	for i, e := range effortLadder {
+		if strings.EqualFold(e, s) {
+			return i
+		}
+	}
+	return 0
+}
+
+// bodyCurrentEffort pulls the requested effort out of body, looking at the
+// three locations NVIDIA has used over time (top-level, chat_template_kwargs,
+// and the thinking wrapper).
+func bodyCurrentEffort(body []byte) string {
+	var raw map[string]any
+	if json.Unmarshal(body, &raw) != nil {
+		return ""
+	}
+	if s, ok := raw["reasoning_effort"].(string); ok && s != "" {
+		return s
+	}
+	if kw, ok := raw["chat_template_kwargs"].(map[string]any); ok {
+		if s, ok := kw["reasoning_effort"].(string); ok && s != "" {
+			return s
+		}
+	}
+	if t, ok := raw["thinking"].(map[string]any); ok {
+		if s, ok := t["reasoning_effort"].(string); ok && s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// mutateBodyEffort rewrites the reasoning_effort field in body to nextLevel.
+// Returns the new body bytes and ok=true on success; ok=false means the body
+// had no effort field to mutate (caller should stop the ladder).
+func mutateBodyEffort(body []byte, nextLevel string) ([]byte, bool) {
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, false
+	}
+	touched := false
+	if _, ok := raw["reasoning_effort"]; ok {
+		raw["reasoning_effort"] = nextLevel
+		touched = true
+	}
+	if kw, ok := raw["chat_template_kwargs"].(map[string]any); ok {
+		if _, ok := kw["reasoning_effort"]; ok {
+			kw["reasoning_effort"] = nextLevel
+			touched = true
+		}
+	}
+	if t, ok := raw["thinking"].(map[string]any); ok {
+		if _, ok := t["reasoning_effort"]; ok {
+			t["reasoning_effort"] = nextLevel
+			touched = true
+		}
+	}
+	if !touched {
+		return nil, false
+	}
+	out, err := json.Marshal(raw)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+// effortErrorRe matches a bare effort-tier word. \b matters: plain substring
+// matching made "maximum" match "max" and "allow"/"below" match "low", so
+// unrelated 400s burned a captcha on a pointless ladder retry.
+var effortErrorRe = regexp.MustCompile(`(?i)\b(max|xhigh|high|medium|low|none)\b`)
+
+// looksLikeEffortError checks whether the upstream error message is the kind
+// that the ladder retry can recover from — i.e. "unsupported reasoning_effort"
+// rather than an unrelated 400 (bad schema, missing field, etc.). We require
+// the word "reasoning" plus a bare effort-tier word so we don't retry on every
+// 400 by accident.
+func looksLikeEffortError(msg string) bool {
+	return strings.Contains(strings.ToLower(msg), "reasoning") && effortErrorRe.MatchString(msg)
+}
+
 func (e *Executor) doPredict(ctx context.Context, info models.ModelInfo, body []byte, opts clipexec.Options) (*http.Response, func(), error) {
 	clientToken := ""
 	if opts.Headers != nil {
 		clientToken = opts.Headers.Get("nv-captcha-token")
 	}
-	maxAttempts := 1
-	if clientToken == "" && (e.pool != nil || e.auto) {
-		maxAttempts = 3
-	}
+	// Two independent retry budgets (see effortLadder above):
+	//   - maxCaptchaRetries: stale-lease / invalid-token refetches. A stale
+	//     token failing more than twice signals a systemic problem (proxy down,
+	//     poisoned pool) — surface 401 instead of draining the pool and
+	//     starving concurrent requests.
+	//   - maxLadderSteps: effort-tier descents.
+	// Worst case 1 + 2 + 5 = 8 upstream sends.
+	captchaRetries := 0
+	ladderSteps := 0
 
 	var release func()
 	cleanup := func() {
@@ -257,9 +408,13 @@ func (e *Executor) doPredict(ctx context.Context, info models.ModelInfo, body []
 		endpoint = e.predictURL(info)
 	}
 
+	// currentBody is mutated down the effort ladder when the upstream rejects
+	// the requested tier. effortIdx points at the tier we are about to send.
+	currentBody := body
+	effortIdx := effortStartIndex(body)
+
 	var upResp *http.Response
-	staleLeases := 0
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+	for attempt := 1; ; attempt++ {
 		token, lease, err := e.resolveCaptcha(ctx, clientToken, attempt == 1)
 		if err != nil {
 			cleanup()
@@ -280,7 +435,7 @@ func (e *Executor) doPredict(ctx context.Context, info models.ModelInfo, body []
 		}
 		release = rel
 
-		upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(currentBody))
 		if err != nil {
 			cleanup()
 			if lease != nil {
@@ -307,8 +462,8 @@ func (e *Executor) doPredict(ctx context.Context, info models.ModelInfo, body []
 		}
 		if lease != nil && !lease.Commit() {
 			cleanup()
-			staleLeases++
-			if staleLeases >= maxAttempts {
+			captchaRetries++
+			if captchaRetries > maxCaptchaRetries {
 				return nil, nil, &coreauth.Error{
 					Code:       "request_scoped",
 					Message:    "captcha token invalid or expired; retry the request",
@@ -340,18 +495,40 @@ func (e *Executor) doPredict(ctx context.Context, info models.ModelInfo, body []
 		release = nil
 
 		retryable := isRetryableCaptchaFailure(status, raw)
-		if retryable && attempt < maxAttempts {
-			log.Printf("upstream captcha failure status=%d (attempt %d/%d); fetching a fresh token",
-				status, attempt, maxAttempts)
+		if retryable {
+			if captchaRetries >= maxCaptchaRetries {
+				return nil, nil, &coreauth.Error{
+					Code:       "request_scoped",
+					Message:    "captcha token invalid or expired; retry the request",
+					HTTPStatus: http.StatusUnauthorized,
+				}
+			}
+			captchaRetries++
+			log.Printf("upstream captcha failure status=%d (attempt %d, captcha retry %d/%d); fetching a fresh token",
+				status, attempt, captchaRetries, maxCaptchaRetries)
 			continue
 		}
-		if retryable {
-			return nil, nil, &coreauth.Error{
-				Code:       "request_scoped",
-				Message:    "captcha token invalid or expired; retry the request",
-				HTTPStatus: http.StatusUnauthorized,
+
+		// Effort ladder: if the upstream rejected the reasoning_effort tier we
+		// asked for, walk one step down and retry. We only descend on errors
+		// that look effort-related (avoid mutating on every 400). Once we hit
+		// the floor of the ladder or maxLadderSteps, give up and surface the
+		// error verbatim.
+		next := effortIdx + ladderSteps + 1
+		if status == 400 && ladderSteps < maxLadderSteps && next < len(effortLadder) && looksLikeEffortError(string(raw)) {
+			ladderSteps++
+			rejected := effortLadder[next-1]
+			nextBody, ok := mutateBodyEffort(currentBody, effortLadder[next])
+			if !ok {
+				log.Printf("upstream effort reject at tier=%s but body had no effort field to mutate; surfacing 400", rejected)
+			} else {
+				log.Printf("upstream rejected effort=%s; retrying at %s (attempt %d, ladder step %d/%d)",
+					rejected, effortLadder[next], attempt, ladderSteps, maxLadderSteps)
+				currentBody = nextBody
+				continue
 			}
 		}
+
 		msg := strings.TrimSpace(string(raw))
 		if msg == "" {
 			msg = "upstream request failed"
@@ -361,11 +538,6 @@ func (e *Executor) doPredict(ctx context.Context, info models.ModelInfo, body []
 			Message:    msg,
 			HTTPStatus: http.StatusBadGateway,
 		}
-	}
-	return nil, nil, &coreauth.Error{
-		Code:       "request_scoped",
-		Message:    "captcha token invalid or expired; retry the request",
-		HTTPStatus: http.StatusUnauthorized,
 	}
 }
 
@@ -433,7 +605,7 @@ func (e *Executor) resolveCaptcha(ctx context.Context, clientToken string, allow
 		lease, err := e.pool.TakeLease(takeCtx)
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
-				fills, takes, errs, expired := e.pool.Stats()
+				fills, takes, errs, expired, _, _ := e.pool.Stats()
 				return "", nil, fmt.Errorf("captcha pool empty after %s (ready=%d fills=%d takes=%d errors=%d expired=%d); retry later",
 					e.captchaWait, e.pool.Ready(), fills, takes, errs, expired)
 			}

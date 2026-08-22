@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chromedp/chromedp"
@@ -30,15 +31,34 @@ type Browser struct {
 	cancel  context.CancelFunc // allocator
 	bCancel context.CancelFunc // browser tab / process owner
 
-	mu     sync.Mutex
-	closed bool
-	warmed bool
-	lastOK time.Time
+	mu          sync.Mutex
+	closed      bool
+	warmed      bool
+	lastOK      time.Time
+	pgURL       string // resolved playground URL
+	navCount    atomic.Uint64
+	stickyCount atomic.Uint64
+
+	// Batch-mint state (see batch.go): sitekey scraped once per page load and
+	// the ids of extra invisible widgets rendered on top of NVIDIA's primary.
+	// Guarded by mu. Reset on every re-navigate — extras don't survive it.
+	sitekey  string
+	extraIDs []string
 }
 
 // stickyMaxIdle is how long a warm playground tab is trusted for sticky execute.
-// Longer idle (user paused mid-chat) often leaves the widget unable to mint tokens.
-const stickyMaxIdle = 60 * time.Second
+// Tuned for chat workloads (e.g. Claude Code) where reasoning turns regularly
+// pause minutes between requests: 60s forced a full re-navigate (~6–10s) after
+// any pause, spiking TTFT. 10min keeps the sticky ~300ms path across normal
+// think-gaps while still recovering a stale widget before it stops minting.
+const stickyMaxIdle = 10 * time.Minute
+
+// reNavTimeout bounds a sticky re-navigate (playground already loaded once, so
+// a healthy reload is <10s with assets blocked). 90s was a dud: when NVIDIA
+// rate-limits or the network blips, the worker sat 90s per failed mint and the
+// pool stayed empty that whole window. 30s fails fast so a transient clears
+// sooner and a hard block surfaces a 503 without a 90s hang per request.
+const reNavTimeout = 30 * time.Second
 
 // NewBrowser starts a shared Chrome process and warms the playground page.
 // Call Close when done.
@@ -51,6 +71,8 @@ const stickyMaxIdle = 60 * time.Second
 //     by default to cut per-navigate RAM/bandwidth; re-enable only if a future
 //     site change makes image decode required for token extraction.
 //   - CHROME_PROXY / BrowserConfig.Proxy: Chrome --proxy-server (e.g. socks5://host:port)
+//   - BrowserConfig.Playground: playground URL to mint tokens on (default is
+//     minimax-m3; override when that model retires)
 func NewBrowser(parent context.Context, cfg BrowserConfig) (*Browser, error) {
 	cfg = cfg.withDefaults()
 	allocOpts := ChromeAllocatorOptions()
@@ -88,16 +110,20 @@ func NewBrowser(parent context.Context, cfg BrowserConfig) (*Browser, error) {
 		return nil, fmt.Errorf("captcha browser alloc: %w", err)
 	}
 
+	// Use explicit playground URL from config (no auto-probe).
+	pgURL := cfg.Playground
+
 	b := &Browser{
 		browser: browser,
 		cancel:  allocCancel,
 		bCancel: bCancel,
+		pgURL:   pgURL,
 	}
 
 	// Warm playground once so Extract can skip Navigate in the steady state.
 	warmCtx, warmCancel := context.WithTimeout(browser, 90*time.Second)
 	defer warmCancel()
-	if err := warmPlayground(warmCtx); err != nil {
+	if err := warmPlayground(warmCtx, pgURL); err != nil {
 		b.Close()
 		return nil, fmt.Errorf("captcha browser warm: %w", err)
 	}
@@ -121,7 +147,10 @@ func (b *Browser) Extract(ctx context.Context) (string, error) {
 	// most of captcha-wait (30s) before recovery begins.
 	needNav := !b.warmed || time.Since(b.lastOK) > stickyMaxIdle
 	if needNav {
-		token, err := b.runExtract(ctx, 90*time.Second, navigateAndExecute)
+		b.navCount.Add(1)
+		token, err := b.runExtract(ctx, reNavTimeout, func(c context.Context) (string, error) {
+			return navigateAndExecute(c, b.pgURL)
+		})
 		if err != nil {
 			b.warmed = false
 			return "", err
@@ -131,13 +160,17 @@ func (b *Browser) Extract(ctx context.Context) (string, error) {
 		return token, nil
 	}
 
+	b.stickyCount.Add(1)
 	token, err := b.runExtract(ctx, 5*time.Second, executeOnly)
 	if err == nil {
 		b.lastOK = time.Now()
 		return token, nil
 	}
 	// Page may have broken (navigation, bot wall, widget gone) — full recover.
-	token, navErr := b.runExtract(ctx, 90*time.Second, navigateAndExecute)
+	b.navCount.Add(1)
+	token, navErr := b.runExtract(ctx, reNavTimeout, func(c context.Context) (string, error) {
+		return navigateAndExecute(c, b.pgURL)
+	})
 	if navErr != nil {
 		b.warmed = false
 		return "", fmt.Errorf("sticky execute failed (%v); re-navigate failed: %w", err, navErr)
@@ -168,6 +201,16 @@ func (b *Browser) Close() {
 		b.bCancel()
 	}
 	b.cancel()
+}
+
+// NavCount returns the number of re-navigates (slow path ~6-10s).
+func (b *Browser) NavCount() uint64 {
+	return b.navCount.Load()
+}
+
+// StickyCount returns the number of sticky executes (fast path ~300ms).
+func (b *Browser) StickyCount() uint64 {
+	return b.stickyCount.Load()
 }
 
 // quietChromedpErrorf suppresses known-benign CDP events chromedp has not

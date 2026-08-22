@@ -1,6 +1,10 @@
 package nvidia
 
-import "strings"
+import (
+	"strings"
+
+	"glm52-nvidia/internal/models"
+)
 
 type reasoningKind uint8
 
@@ -17,21 +21,34 @@ type reasoningProfile struct {
 	defaultLevel string
 }
 
+// reasoningProfiles carries only the cases that diverge from the generic
+// effort-based fallback. Today that is minimax-m3 alone: it sends a custom
+// `thinking_mode` kwarg instead of the standard `reasoning_effort`.
+//
+// Every other reasoning-capable model — current and future — falls through
+// to defaultReasoningProfile (built from defaultReasoningLevels + the
+// registry's Capability.Reasoning flag).
 var reasoningProfiles = map[string]reasoningProfile{
-	"deepseek-ai/deepseek-v4-flash":       {kind: reasoningEffort, levels: []string{"none", "high", "max"}, defaultLevel: "high"},
-	"deepseek-ai/deepseek-v4-pro":         {kind: reasoningEffort, levels: []string{"none", "high", "max"}, defaultLevel: "high"},
-	"mistralai/mistral-medium-3.5-128b":   {kind: reasoningEffort, levels: []string{"none", "high"}, defaultLevel: "high"},
-	"mistralai/mistral-small-4-119b-2603": {kind: reasoningEffort, levels: []string{"none", "high"}, defaultLevel: "high"},
-	"nvidia/nemotron-3-super-120b-a12b":   {kind: reasoningEffort, levels: []string{"none", "low", "high"}, defaultLevel: "high"},
-	"nvidia/nemotron-3-ultra-550b-a55b":   {kind: reasoningEffort, levels: []string{"none", "medium", "high"}, defaultLevel: "high"},
-	"openai/gpt-oss-120b":                 {kind: reasoningEffort, levels: []string{"low", "medium", "high"}, defaultLevel: "medium"},
-	"openai/gpt-oss-20b":                  {kind: reasoningEffort, levels: []string{"low", "medium", "high"}, defaultLevel: "medium"},
-	"google/diffusiongemma-26b-a4b-it":    {kind: reasoningToggle},
-	"nvidia/nemotron-3-nano-30b-a3b":      {kind: reasoningToggle},
-	"qwen/qwen3.5-397b-a17b":              {kind: reasoningToggle},
-	"sarvamai/sarvam-m":                   {kind: reasoningToggle},
-	"z-ai/glm-5.2":                        {kind: reasoningEffortAndToggle, levels: []string{"low", "medium", "high"}, defaultLevel: "high"},
-	"minimaxai/minimax-m3":                {kind: reasoningMiniMax},
+	"minimaxai/minimax-m3": {kind: reasoningMiniMax},
+}
+
+// defaultReasoningLevels is what unknown reasoning-capable models get. Listed
+// low → high so mapEffort's "round up to next declared level" walks the user
+// through low → medium → high → xhigh → max as they ask for more effort.
+// "none" sits at the floor so callers can explicitly disable reasoning.
+//
+// ponytail: 6 tiers covers every NVIDIA model that exposes an effort scale
+// today (low/medium/high/xhigh/max). Add a new tier here only when NVIDIA
+// ships a level none of these express.
+var defaultReasoningLevels = []string{"none", "low", "medium", "high", "xhigh", "max"}
+
+// defaultReasoningProfile is the single profile every unknown reasoning-
+// capable model gets. Built from defaultReasoningLevels so adding a tier
+// only needs one edit.
+var defaultReasoningProfile = reasoningProfile{
+	kind:         reasoningEffort,
+	levels:       defaultReasoningLevels,
+	defaultLevel: "high",
 }
 
 var effortRanks = map[string]int{
@@ -56,10 +73,35 @@ func normalizeThinking(raw map[string]any) {
 	enabled, hasEnabled := requestedThinkingEnabled(raw, kw)
 	clearThinking, hasClearThinking := requestedClearThinking(raw, kw)
 
+	// Budget → effort: Claude Code speaks Anthropic shape
+	// {"thinking":{"type":"enabled","budget_tokens":N}} with no effort tier.
+	// Without this every budget collapses to profile.defaultLevel, so a 1k
+	// request overthinks at max effort. Explicit reasoning_effort still wins;
+	// an explicit disabled beats any budget.
+	budget, hasBudget := requestedBudget(raw)
+	explicitlyOff := hasEnabled && !enabled
+	if !hasEffort && hasBudget && !explicitlyOff {
+		effort = effortFromBudget(budget)
+		hasEffort = true
+	}
+
 	delete(raw, "thinking")
 	delete(raw, "enable_thinking")
 	delete(raw, "clear_thinking")
 	delete(raw, "reasoning_effort")
+	delete(raw, "thinking_budget")
+
+	// Fallback: a model the registry reports as reasoning-capable but without
+	// an explicit profile here gets defaultReasoningProfile rather than being
+	// silently no-oped. The registry is the single source of truth — per-model
+	// overrides live in reasoningProfiles above only when they diverge from the
+	// generic profile (different kwarg name, different default level, etc.).
+	if !supported {
+		if info, err := models.Lookup(model); err == nil && info.Capability != nil && info.Capability.Reasoning {
+			profile = defaultReasoningProfile
+			supported = true
+		}
+	}
 
 	if supported {
 		switch profile.kind {
@@ -142,6 +184,50 @@ func requestedThinkingEnabled(raw, kw map[string]any) (bool, bool) {
 	}
 	enabled, ok := raw["enable_thinking"].(bool)
 	return enabled, ok
+}
+
+// requestedBudget extracts the Anthropic-style thinking budget: Claude Code
+// sends {"thinking":{"type":"enabled","budget_tokens":N}}; "thinking_budget"
+// is the common top-level alias for the same knob.
+func requestedBudget(raw map[string]any) (int, bool) {
+	if t, ok := raw["thinking"].(map[string]any); ok {
+		if n, ok := jsonInt(t["budget_tokens"]); ok {
+			return n, true
+		}
+	}
+	return jsonInt(raw["thinking_budget"])
+}
+
+// jsonInt narrows a decoded JSON number to int (map[string]any decoding
+// yields float64 for every number).
+func jsonInt(v any) (int, bool) {
+	n, ok := v.(float64)
+	if !ok {
+		return 0, false
+	}
+	return int(n), true
+}
+
+// effortFromBudget derives an effort tier from a thinking token budget.
+//
+// ponytail: heuristic thresholds, not spec — NVIDIA exposes no budget knob,
+// so this only stops a 1k-budget request from running at max effort (the main
+// Claude Code latency bug). Retune the boundaries here if calibration drifts.
+func effortFromBudget(t int) string {
+	switch {
+	case t <= 0:
+		return "none"
+	case t < 2048:
+		return "low"
+	case t < 8192:
+		return "medium"
+	case t < 16384:
+		return "high"
+	case t < 32768:
+		return "xhigh"
+	default:
+		return "max"
+	}
 }
 
 func requestedClearThinking(raw, kw map[string]any) (any, bool) {

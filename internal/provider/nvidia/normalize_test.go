@@ -70,52 +70,42 @@ func TestNormalizeThinkingKwargsAliases(t *testing.T) {
 		stripped []string
 	}{
 		{
-			name: "zai thinking enabled",
-			in:   `{"model":"z-ai/glm-5.2","stream":false,"thinking":{"type":"enabled","clear_thinking":false}}`,
+			name: "minimax thinking enabled",
+			in:   `{"model":"minimaxai/minimax-m3","stream":false,"thinking":{"type":"enabled","clear_thinking":false}}`,
 			want: map[string]any{
-				"enable_thinking": true,
-				"clear_thinking":  false,
+				"thinking_mode": "enabled",
 			},
 			stripped: []string{"thinking"},
 		},
 		{
-			name: "zai thinking disabled",
-			in:   `{"model":"z-ai/glm-5.2","stream":false,"thinking":{"type":"disabled"}}`,
+			name: "minimax thinking disabled",
+			in:   `{"model":"minimaxai/minimax-m3","stream":false,"thinking":{"type":"disabled"}}`,
 			want: map[string]any{
-				"enable_thinking": false,
+				"thinking_mode": "disabled",
 			},
 			stripped: []string{"thinking"},
-		},
-		{
-			name: "top-level enable_thinking false",
-			in:   `{"model":"qwen/qwen3.5-397b-a17b","stream":false,"enable_thinking":false}`,
-			want: map[string]any{
-				"enable_thinking": false,
-			},
-			stripped: []string{"enable_thinking"},
 		},
 		{
 			name: "top-level enable_thinking true + effort",
-			in:   `{"model":"z-ai/glm-5.2","stream":false,"enable_thinking":true,"reasoning_effort":"high"}`,
+			in:   `{"model":"minimaxai/minimax-m3","stream":false,"enable_thinking":true,"reasoning_effort":"high"}`,
 			want: map[string]any{
-				"enable_thinking":  true,
-				"reasoning_effort": "high",
+				"thinking_mode": "enabled",
 			},
 			stripped: []string{"enable_thinking", "reasoning_effort"},
 		},
 		{
 			name: "kwargs wins over aliases",
-			in:   `{"model":"qwen/qwen3.5-397b-a17b","stream":false,"chat_template_kwargs":{"enable_thinking":false},"thinking":{"type":"enabled"},"enable_thinking":true}`,
+			in:   `{"model":"minimaxai/minimax-m3","stream":false,"chat_template_kwargs":{"thinking_mode":"enabled"},"thinking":{"type":"enabled"},"enable_thinking":true}`,
 			want: map[string]any{
-				"enable_thinking": false,
+				"thinking_mode": "enabled",
 			},
 			stripped: []string{"thinking", "enable_thinking"},
 		},
 		{
-			name: "disabled thinking removes conflicting effort",
-			in:   `{"model":"z-ai/glm-5.2","stream":false,"chat_template_kwargs":{"enable_thinking":false},"reasoning_effort":"high"}`,
+			name: "minimax none effort disables thinking",
+			in:   `{"model":"minimaxai/minimax-m3","stream":false,"reasoning_effort":"none"}`,
 			want: map[string]any{
-				"enable_thinking": false,
+				"thinking_mode": "disabled",
 			},
 			stripped: []string{"reasoning_effort"},
 		},
@@ -149,6 +139,11 @@ func TestNormalizeThinkingKwargsAliases(t *testing.T) {
 }
 
 func TestNormalizeRequestBodyMapsReasoningEffortByModel(t *testing.T) {
+	// Per-model effort roundups for the (now mostly retired) hardcoded
+	// profiles were dropped alongside those profiles — see reasoning.go.
+	// Only the MiniMax-specific cases survive because MiniMax is the one
+	// model with a dedicated reasoningProfile; everything else uses the
+	// generic ladder tested separately.
 	cases := []struct {
 		name  string
 		model string
@@ -156,15 +151,6 @@ func TestNormalizeRequestBodyMapsReasoningEffortByModel(t *testing.T) {
 		key   string
 		want  any
 	}{
-		{name: "deepseek low rounds up to high", model: "deepseek-ai/deepseek-v4-pro", in: "low", key: "reasoning_effort", want: "high"},
-		{name: "deepseek medium rounds up to high", model: "deepseek-ai/deepseek-v4-flash", in: "medium", key: "reasoning_effort", want: "high"},
-		{name: "deepseek xhigh rounds up to max", model: "deepseek-ai/deepseek-v4-pro", in: "xhigh", key: "reasoning_effort", want: "max"},
-		{name: "gpt oss max caps at high", model: "openai/gpt-oss-120b", in: "max", key: "reasoning_effort", want: "high"},
-		{name: "mistral low rounds up to high", model: "mistralai/mistral-medium-3.5-128b", in: "low", key: "reasoning_effort", want: "high"},
-		{name: "nemotron super medium rounds up to high", model: "nvidia/nemotron-3-super-120b-a12b", in: "medium", key: "reasoning_effort", want: "high"},
-		{name: "nemotron ultra low rounds up to medium", model: "nvidia/nemotron-3-ultra-550b-a55b", in: "low", key: "reasoning_effort", want: "medium"},
-		{name: "qwen none disables thinking", model: "qwen/qwen3.5-397b-a17b", in: "none", key: "enable_thinking", want: false},
-		{name: "qwen high enables thinking", model: "qwen/qwen3.5-397b-a17b", in: "high", key: "enable_thinking", want: true},
 		{name: "minimax medium uses adaptive thinking", model: "minimaxai/minimax-m3", in: "medium", key: "thinking_mode", want: "adaptive"},
 		{name: "minimax xhigh enables thinking", model: "minimaxai/minimax-m3", in: "xhigh", key: "thinking_mode", want: "enabled"},
 	}
@@ -215,5 +201,133 @@ func TestReasoningProfilesReferenceRegisteredModels(t *testing.T) {
 		if _, err := models.Lookup(model); err != nil {
 			t.Errorf("reasoning profile references unsupported model %q: %v", model, err)
 		}
+	}
+}
+
+// injectReasoningModel registers a synthetic reasoning-capable registry entry
+// so the generic effort-profile path is testable without a network refresh;
+// removed again on test exit.
+func injectReasoningModel(t *testing.T) string {
+	const id = "test/reasoner"
+	t.Cleanup(func() { delete(models.Models, id) })
+	models.Models[id] = models.ModelInfo{
+		Slug:       "reasoner",
+		Namespace:  models.Namespace,
+		FunctionID: "00000000-0000-0000-0000-000000000000",
+		Capability: &models.ModelCapability{Reasoning: true},
+	}
+	return id
+}
+
+func TestEffortFromBudgetBoundaries(t *testing.T) {
+	cases := []struct {
+		budget int
+		want   string
+	}{
+		{-1, "none"},
+		{0, "none"},
+		{1, "low"},
+		{2047, "low"},
+		{2048, "medium"},
+		{8191, "medium"},
+		{8192, "high"},
+		{16383, "high"},
+		{16384, "xhigh"},
+		{32767, "xhigh"},
+		{32768, "max"},
+		{131072, "max"},
+	}
+	for _, tc := range cases {
+		if got := effortFromBudget(tc.budget); got != tc.want {
+			t.Errorf("effortFromBudget(%d)=%q want %q", tc.budget, got, tc.want)
+		}
+	}
+}
+
+func TestNormalizeThinkingBudget(t *testing.T) {
+	reasoner := injectReasoningModel(t)
+	cases := []struct {
+		name     string
+		in       string
+		want     map[string]any
+		stripped []string
+	}{
+		{
+			name:     "budget only derives low",
+			in:       `{"model":"` + reasoner + `","stream":false,"thinking":{"type":"enabled","budget_tokens":1024}}`,
+			want:     map[string]any{"reasoning_effort": "low"},
+			stripped: []string{"thinking", "thinking_budget"},
+		},
+		{
+			name:     "top-level thinking_budget alias",
+			in:       `{"model":"` + reasoner + `","stream":false,"thinking_budget":5000}`,
+			want:     map[string]any{"reasoning_effort": "medium"},
+			stripped: []string{"thinking", "thinking_budget"},
+		},
+		{
+			name:     "explicit effort wins over budget",
+			in:       `{"model":"` + reasoner + `","stream":false,"reasoning_effort":"high","thinking":{"budget_tokens":1024}}`,
+			want:     map[string]any{"reasoning_effort": "high"},
+			stripped: []string{"thinking", "reasoning_effort"},
+		},
+		{
+			name:     "explicit disabled beats budget",
+			in:       `{"model":"` + reasoner + `","stream":false,"thinking":{"type":"disabled","budget_tokens":32000}}`,
+			want:     map[string]any{"reasoning_effort": "none"},
+			stripped: []string{"thinking", "thinking_budget"},
+		},
+		{
+			name:     "zero budget disables",
+			in:       `{"model":"` + reasoner + `","stream":false,"thinking":{"type":"enabled","budget_tokens":0}}`,
+			want:     map[string]any{"reasoning_effort": "none"},
+			stripped: []string{"thinking", "thinking_budget"},
+		},
+		{
+			name:     "minimax medium budget stays adaptive",
+			in:       `{"model":"minimaxai/minimax-m3","stream":false,"thinking":{"type":"enabled","budget_tokens":4096}}`,
+			want:     map[string]any{"thinking_mode": "adaptive"},
+			stripped: []string{"thinking", "thinking_budget"},
+		},
+		{
+			name:     "minimax large budget enables",
+			in:       `{"model":"minimaxai/minimax-m3","stream":false,"thinking":{"type":"enabled","budget_tokens":16384}}`,
+			want:     map[string]any{"thinking_mode": "enabled"},
+			stripped: []string{"thinking", "thinking_budget"},
+		},
+		{
+			name:     "minimax disabled plus budget stays off",
+			in:       `{"model":"minimaxai/minimax-m3","stream":false,"thinking":{"type":"disabled","budget_tokens":32000}}`,
+			want:     map[string]any{"thinking_mode": "disabled"},
+			stripped: []string{"thinking", "thinking_budget"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := NormalizeRequestBody([]byte(tc.in))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var raw map[string]any
+			if err := json.Unmarshal(out, &raw); err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range tc.stripped {
+				if _, ok := raw[key]; ok {
+					t.Fatalf("alias %q should be stripped, body=%s", key, out)
+				}
+			}
+			kw, ok := raw["chat_template_kwargs"].(map[string]any)
+			if !ok {
+				t.Fatalf("chat_template_kwargs missing from %s", out)
+			}
+			if len(kw) != len(tc.want) {
+				t.Fatalf("kwargs=%#v want %#v (body=%s)", kw, tc.want, out)
+			}
+			for k, v := range tc.want {
+				if kw[k] != v {
+					t.Fatalf("kw[%q]=%#v want %#v (body=%s)", k, kw[k], v, out)
+				}
+			}
+		})
 	}
 }

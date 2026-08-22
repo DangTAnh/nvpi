@@ -15,7 +15,7 @@ import (
 
 // --- Client ---
 
-// Client is the GLM-5.2 API client.
+// Client is the NVIDIA Playground API client.
 type Client struct {
 	captchaToken string // reverse-engineered captcha token
 
@@ -69,7 +69,7 @@ func WithThinking(enable bool) Option {
 	return func(c *Client) { c.thinking = &enable }
 }
 
-// New creates a new GLM-5.2 client configured with an hCaptcha token.
+// New creates a new NVIDIA Playground client configured with an hCaptcha token.
 func New(opts ...Option) *Client {
 	c := &Client{
 		httpClient: &http.Client{Timeout: requestTimeout},
@@ -241,45 +241,39 @@ func (c *Client) doStream(ctx context.Context, req *ChatRequest, cb func(StreamC
 	reader := bufio.NewReader(resp.Body)
 	for {
 		line, err := reader.ReadString('\n')
+
+		// Process the buffered line BEFORE the error check: a final SSE line
+		// without trailing newline arrives together with io.EOF, and checking
+		// err first silently dropped the last content/usage event.
+		line = strings.TrimSpace(line)
+		if line == "data: [DONE]" {
+			cb(StreamChunk{Done: true})
+			return nil
+		}
+		if line != "" && !strings.HasPrefix(line, ":") && strings.HasPrefix(line, "data: ") {
+			data := strings.TrimPrefix(line, "data: ")
+			var chunk ChatChunk
+			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+				cb(StreamChunk{Error: fmt.Errorf("glm52: decode chunk: %w", err)})
+			} else {
+				sc := StreamChunk{}
+				if len(chunk.Choices) > 0 {
+					sc.Content = chunk.Choices[0].Delta.Content
+					sc.Reasoning = chunk.Choices[0].Delta.ReasoningContent
+				}
+				if chunk.Usage != nil {
+					sc.Usage = chunk.Usage
+				}
+				cb(sc)
+			}
+		}
+
 		if err != nil {
 			if err == io.EOF {
 				cb(StreamChunk{Done: true})
 				return nil
 			}
 			return fmt.Errorf("glm52: read sse: %w", err)
-		}
-
-		line = strings.TrimSpace(line)
-
-		// Skip empty lines / comments
-		if line == "" || strings.HasPrefix(line, ":") {
-			continue
-		}
-
-		// data: [DONE]
-		if line == "data: [DONE]" {
-			cb(StreamChunk{Done: true})
-			return nil
-		}
-
-		// data: {...}
-		if strings.HasPrefix(line, "data: ") {
-			data := strings.TrimPrefix(line, "data: ")
-			var chunk ChatChunk
-			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-				cb(StreamChunk{Error: fmt.Errorf("glm52: decode chunk: %w", err)})
-				continue
-			}
-
-			sc := StreamChunk{}
-			if len(chunk.Choices) > 0 {
-				sc.Content = chunk.Choices[0].Delta.Content
-				sc.Reasoning = chunk.Choices[0].Delta.ReasoningContent
-			}
-			if chunk.Usage != nil {
-				sc.Usage = chunk.Usage
-			}
-			cb(sc)
 		}
 	}
 }
@@ -302,11 +296,4 @@ func parseError(raw []byte) error {
 		return fmt.Errorf("glm52: %s: %s", oaiErr.Error.Type, oaiErr.Error.Message)
 	}
 	return fmt.Errorf("glm52: http error: %s", string(raw[:min(len(raw), 300)]))
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

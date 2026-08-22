@@ -7,17 +7,17 @@ func TestLookupDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Lookup(\"\"): %v", err)
 	}
-	if info.Slug != "glm-5.2" {
-		t.Fatalf("default slug = %q want glm-5.2", info.Slug)
+	if info.Slug != "minimax-m3" {
+		t.Fatalf("default slug = %q want minimax-m3", info.Slug)
 	}
-	if info.FunctionID != "3b9748d8-1d85-40e8-8573-0eeaa63a4b63" {
-		t.Fatalf("default function id = %q want the known GLM id", info.FunctionID)
+	if info.FunctionID != "87ea0ddc-cff1-4bca-bf8b-3bd98a35ddd0" {
+		t.Fatalf("default function id = %q want the known MiniMax id", info.FunctionID)
 	}
 }
 
 func TestLookupKnown(t *testing.T) {
 	cases := map[string]string{
-		"z-ai/glm-5.2":                      "glm-5.2",
+		"minimaxai/minimax-m3":              "minimax-m3",
 		"deepseek-ai/deepseek-v4-pro":       "deepseek-v4-pro",
 		"nvidia/nemotron-3-ultra-550b-a55b": "nemotron-3-ultra-550b-a55b",
 	}
@@ -51,8 +51,8 @@ func TestLookupUnknown(t *testing.T) {
 }
 
 func TestPredictEndpoint(t *testing.T) {
-	info, _ := Lookup("z-ai/glm-5.2")
-	want := "https://api.ngc.nvidia.com/v2/predict/models/" + Namespace + "/glm-5.2"
+	info, _ := Lookup("minimaxai/minimax-m3")
+	want := "https://api.ngc.nvidia.com/v2/predict/models/" + Namespace + "/minimax-m3"
 	if got := info.PredictEndpoint(); got != want {
 		t.Fatalf("PredictEndpoint() = %q want %q", got, want)
 	}
@@ -112,4 +112,75 @@ func uuid42(s string) bool {
 		}
 	}
 	return true
+}
+
+// ContextLength values scraped from the playground pages'
+// `\"contextLength\":<int>` literal (same source as crawler.go's
+// contextLengthRE). Pages that did not inline the field are absent here and
+// must stay 0 — callers apply their own default (see ModelInfo.ContextLength).
+func TestContextLengths(t *testing.T) {
+	resolved := map[string]int{
+		"minimaxai/minimax-m3":                    1048576,
+		"minimaxai/minimax-m2.7":                  204800,
+		"deepseek-ai/deepseek-v4-pro":             1048576,
+		"deepseek-ai/deepseek-v4-flash":           1048576,
+		"nvidia/nemotron-3-ultra-550b-a55b":       1048576,
+		"nvidia/nemotron-3-super-120b-a12b":       1048576,
+		"meta/llama-4-maverick-17b-128e-instruct": 1048576,
+		"openai/gpt-oss-120b":                     131072,
+		"bytedance/seed-oss-36b-instruct":         524288,
+		"google/gemma-3n-e4b-it":                  32768,
+		"mistralai/mixtral-8x7b-instruct":         32768,
+		"nvidia/nemotron-mini-4b-instruct":        4096,
+	}
+	for model, want := range resolved {
+		info, err := Lookup(model)
+		if err != nil {
+			t.Errorf("Lookup(%q): %v", model, err)
+			continue
+		}
+		if info.ContextLength != want {
+			t.Errorf("Lookup(%q) ContextLength = %d want %d", model, info.ContextLength, want)
+		}
+	}
+
+	// The default model must carry its real (well above the 262144 fallback)
+	// context length — this is what stops premature context compaction.
+	if info, _ := Lookup("minimaxai/minimax-m3"); info.ContextLength <= 262144 {
+		t.Errorf("minimax-m3 ContextLength = %d, want > 262144 (fallback)", info.ContextLength)
+	}
+
+	unresolved := []string{
+		"01-ai/yi-large",
+		"databricks/dbrx-instruct",
+		"google/codegemma-7b",
+		"google/gemma-2b",
+		"google/recurrentgemma-2b",
+		"mistralai/mistral-nemotron",
+		"nvidia/mistral-nemo-minitron-8b-8k-instruct",
+		"nvidia/nemotron-4-340b-instruct",
+		"thinkingmachines/inkling",
+		"writer/palmyra-creative-122b",
+		"writer/palmyra-fin-70b-32k",
+		"writer/palmyra-med-70b",
+		"writer/palmyra-med-70b-32k",
+		"zyphra/zamba2-7b-instruct",
+	}
+	for _, model := range unresolved {
+		info, err := Lookup(model)
+		if err != nil {
+			t.Errorf("Lookup(%q): %v", model, err)
+			continue
+		}
+		if info.ContextLength != 0 {
+			t.Errorf("Lookup(%q) ContextLength = %d, want 0 (unresolved scrape)", model, info.ContextLength)
+		}
+	}
+
+	// No entry may carry a garbage scrape: 0 (unresolved) or a real value.
+	for model, info := range Models {
+		if info.ContextLength != 0 && info.ContextLength < 4096 {
+			t.Errorf("%q: suspicious ContextLength %d (want 0 or >= 4096)", model, info.ContextLength)
+		}
+	}
 }

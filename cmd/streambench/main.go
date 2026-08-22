@@ -211,21 +211,21 @@ func doStream(ctx context.Context, endpoint string, body []byte, token string, v
 }
 
 type chunkEvent struct {
-	At          time.Time
-	Gap         time.Duration
-	Bytes       int
-	ContentLen  int
-	HasUsage    bool
+	At           time.Time
+	Gap          time.Duration
+	Bytes        int
+	ContentLen   int
+	HasUsage     bool
 	FinishReason string
-	RawPreview  string
+	RawPreview   string
 }
 
 type streamStats struct {
-	TTFB       time.Duration
-	Total      time.Duration
-	Events     []chunkEvent
-	Content    strings.Builder
-	DoneSeen   bool
+	TTFB     time.Duration
+	Total    time.Duration
+	Events   []chunkEvent
+	Content  strings.Builder
+	DoneSeen bool
 }
 
 func collectSSE(body io.Reader, start, headerAt time.Time) streamStats {

@@ -14,7 +14,7 @@ func TestCountTokens_returnsApproximationForEveryModel(t *testing.T) {
 		name  string
 		model string
 	}{
-		{name: "default GLM", model: "z-ai/glm-5.2"},
+		{name: "default M3", model: "minimaxai/minimax-m3"},
 		{name: "other registered model", model: "deepseek-ai/deepseek-v4-pro"},
 	}
 

@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NVPI Dashboard</title>
+<style>
+:root{
+  --bg:#0d1117; --bg2:#161b22; --bg3:#1c2129;
+  --border:#2a3038; --fg:#d6dde6; --dim:#8b949e;
+  --accent:#3fb950; --accent-dim:rgba(63,185,80,.14);
+  --warn:#e3b341; --err:#f85149;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+}
+*{box-sizing:border-box}
+html{background:var(--bg)}
+body{
+  margin:0; padding:20px clamp(12px,4vw,32px) 48px;
+  background:var(--bg); color:var(--fg);
+  font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+.wrap{max-width:1080px;margin:0 auto}
+header{
+  display:flex;flex-wrap:wrap;gap:8px 16px;align-items:baseline;
+  padding-bottom:14px;border-bottom:1px solid var(--border);
+}
+.brand{font-size:22px;font-weight:700;letter-spacing:.5px;color:var(--accent)}
+.ver{font-family:var(--mono);font-size:12px;color:var(--dim);border:1px solid var(--border);
+     border-radius:99px;padding:1px 8px;margin-left:8px;vertical-align:middle}
+.meta{margin-left:auto;font-family:var(--mono);font-size:12.5px;color:var(--dim);
+      display:flex;align-items:center;gap:10px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--dim);display:inline-block}
+.dot.ok{background:var(--accent)} .dot.bad{background:var(--err)}
+
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin-top:18px}
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+.card h2{margin:0 0 8px;font-size:11.5px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);font-weight:600}
+.big{font-family:var(--mono);font-size:30px;line-height:1.1;margin:0 0 10px;color:var(--fg)}
+.big .unit{font-size:13px;color:var(--dim);margin-left:7px}
+.card.off .big{color:var(--dim)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:2px 14px;margin:0;
+    font-family:var(--mono);font-size:12.5px}
+.kv dt{color:var(--dim)} .kv dd{margin:0;text-align:right}
+
+.panel{margin-top:18px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+.panel h2{margin:0 0 10px;font-size:13px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th{text-align:left;color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.8px;
+   padding:4px 8px;border-bottom:1px solid var(--border);font-weight:600}
+td{padding:5px 8px;border-bottom:1px solid var(--bg3)}
+tr:last-child td{border-bottom:none}
+.mono{font-family:var(--mono);font-size:12.5px}
+.num{text-align:right;font-family:var(--mono);white-space:nowrap}
+.badge{display:inline-block;font-family:var(--mono);font-size:10.5px;color:var(--accent);
+       background:var(--accent-dim);border:1px solid rgba(63,185,80,.35);
+       border-radius:99px;padding:0 7px;margin-right:5px}
+.tblscroll{overflow-x:auto}
+
+.warnline{color:var(--warn);font-size:13px;margin:0 0 10px}
+form.chat{display:grid;gap:8px}
+input[type=text],textarea{
+  width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--border);
+  border-radius:7px;padding:8px 10px;font:inherit;
+}
+input[type=text]:focus,textarea:focus{outline:none;border-color:var(--accent)}
+textarea{resize:vertical;min-height:64px}
+.rowbtn{display:flex;align-items:center;gap:12px}
+button.send{
+  margin-left:auto;background:var(--accent);color:#04140a;border:none;border-radius:7px;
+  padding:8px 22px;font:600 14px/1 inherit;cursor:pointer;
+}
+button.send:disabled{opacity:.45;cursor:not-allowed}
+.hint{color:var(--dim);font-size:12px}
+#chat-out{
+  margin-top:12px;background:var(--bg);border:1px solid var(--border);border-radius:7px;
+  padding:10px 12px;max-height:340px;overflow:auto;white-space:pre-wrap;word-break:break-word;
+  font-family:var(--mono);font-size:12.5px;
+}
+footer{margin-top:26px;color:var(--dim);font-size:11.5px;font-family:var(--mono)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="brand">NVPI<span class="ver" id="version">…</span></div>
+  <div class="meta">
+    <span id="uptime">uptime —</span>
+    <span><span class="dot" id="poll-dot"></span> <span id="poll-state">đang kết nối</span></span>
+  </div>
+</header>
+
+<section class="cards">
+  <article class="card" id="card-pool">
+    <h2>Captcha pool</h2>
+    <p class="big"><span id="pool-ready">–</span><span class="unit">ready</span></p>
+    <dl class="kv">
+      <dt>fills</dt><dd id="pool-fills">–</dd>
+      <dt>takes</dt><dd id="pool-takes">–</dd>
+      <dt>errors</dt><dd id="pool-errors">–</dd>
+      <dt>expired</dt><dd id="pool-expired">–</dd>
+      <dt>stale_leases</dt><dd id="pool-stale">–</dd>
+      <dt>ttl</dt><dd id="pool-ttl">–</dd>
+    </dl>
+  </article>
+
+  <article class="card" id="card-chromes">
+    <h2>Chromes</h2>
+    <p class="big"><span id="chrome-live">–</span><span class="unit">/ <span id="chrome-max">–</span> live</span></p>
+    <dl class="kv">
+      <dt>navigations</dt><dd id="chrome-nav">–</dd>
+      <dt>sticky extracts</dt><dd id="chrome-sticky">–</dd>
+    </dl>
+  </article>
+
+  <article class="card">
+    <h2>Limits &amp; registry</h2>
+    <dl class="kv">
+      <dt>max_inflight</dt><dd id="lim-inflight">–</dd>
+      <dt>coalesce_ms</dt><dd id="lim-coalesce">–</dd>
+      <dt>pool_size</dt><dd id="lim-poolsize">–</dd>
+      <dt>pool_batch</dt><dd id="lim-poolbatch">–</dd>
+      <dt>models</dt><dd id="lim-models">–</dd>
+    </dl>
+  </article>
+</section>
+
+<section class="panel">
+  <h2>Models (<span id="model-count">…</span>)</h2>
+  <div class="tblscroll">
+    <table>
+      <thead><tr><th>Model</th><th style="text-align:right">Context</th><th>Caps</th></tr></thead>
+      <tbody id="models-body"><tr><td colspan="3" class="hint">đang tải…</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Thử chat</h2>
+  <p class="warnline">Lưu ý: mỗi lần gửi tốn 1 captcha token từ pool.</p>
+  <form class="chat" id="chat-form">
+    <input type="text" id="chat-model" list="model-list" placeholder="model id (bỏ trống = mặc định minimaxai/minimax-m3)" autocomplete="off">
+    <datalist id="model-list"></datalist>
+    <textarea id="chat-prompt" placeholder="Prompt…"></textarea>
+    <div class="rowbtn">
+      <span class="hint">POST /v1/chat/completions · stream=false</span>
+      <button type="submit" class="send" id="chat-send">Gửi</button>
+    </div>
+  </form>
+  <pre id="chat-out" hidden></pre>
+</section>
+
+<footer>NVPI gateway — NVIDIA Playground anonymous · /api/status poll 5s (tạm dừng khi tab ẩn)</footer>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+
+function fmtCtx(n){
+  if (!n || n <= 0) return "—";
+  if (n >= 1048576){
+    const m = n / 1048576;
+    return (Number.isInteger(m) ? m : m.toFixed(1)) + "M";
+  }
+  return Math.round(n / 1024) + "K";
+}
+function fmtUp(s){
+  if (typeof s !== "number") return "—";
+  const d = Math.floor(s/86400), h = Math.floor(s%86400/3600),
+        m = Math.floor(s%3600/60), sec = Math.floor(s%60);
+  if (d) return d+"d "+h+"h";
+  if (h) return h+"h "+m+"m";
+  if (m) return m+"m "+sec+"s";
+  return sec+"s";
+}
+const esc = (s) => String(s).replace(/[&<>"']/g,
+  (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function setNum(id, v){ $(id).textContent = (typeof v === "number") ? v.toLocaleString("en-US") : "–"; }
+
+/* ---- /api/status poll: 5s, pause khi tab ẩn ---- */
+let timer = null;
+async function poll(){
+  try{
+    const r = await fetch("/api/status");
+    if (!r.ok) throw new Error("HTTP "+r.status);
+    render(await r.json());
+    $("poll-dot").className = "dot ok";
+    $("poll-state").textContent = "live";
+  }catch(e){
+    $("poll-dot").className = "dot bad";
+    $("poll-state").textContent = "offline";
+  }
+}
+function startPolling(){ if (timer === null){ poll(); timer = setInterval(poll, 5000); } }
+function stopPolling(){ if (timer !== null){ clearInterval(timer); timer = null; } }
+document.addEventListener("visibilitychange",
+  () => document.hidden ? stopPolling() : startPolling());
+
+function render(s){
+  $("version").textContent = s.version || "dev";
+  $("uptime").textContent = "uptime " + fmtUp(s.uptime_seconds);
+
+  const p = s.pool || {}, on = p.enabled === true, cardPool = $("card-pool");
+  cardPool.classList.toggle("off", !on);
+  $("pool-ready").textContent = on ? (p.ready ?? "–") : "off";
+  if (on){
+    setNum("pool-fills", p.fills); setNum("pool-takes", p.takes);
+    setNum("pool-errors", p.errors); setNum("pool-expired", p.expired);
+    setNum("pool-stale", p.stale_leases);
+    $("pool-ttl").textContent = (p.ttl_ms != null) ? (p.ttl_ms/1000)+"s" : "–";
+  } else {
+    for (const id of ["pool-fills","pool-takes","pool-errors","pool-expired","pool-stale","pool-ttl"])
+      $(id).textContent = "–";
+  }
+
+  const ch = s.chromes || {};
+  $("card-chromes").classList.toggle("off", !on);
+  $("chrome-live").textContent = on ? (ch.live ?? "–") : "off";
+  $("chrome-max").textContent = ch.max ?? "–";
+  $("chrome-nav").textContent = on && typeof ch.nav_count === "number" ? ch.nav_count.toLocaleString("en-US") : "–";
+  $("chrome-sticky").textContent = on && typeof ch.sticky_count === "number" ? ch.sticky_count.toLocaleString("en-US") : "–";
+
+  const l = s.limits || {};
+  setNum("lim-inflight", l.max_inflight); setNum("lim-coalesce", l.coalesce_ms);
+  setNum("lim-poolsize", l.pool_size); setNum("lim-poolbatch", l.pool_batch);
+  setNum("lim-models", s.models);
+}
+startPolling();
+
+/* ---- /api/models: bảng + datalist cho ô thử chat ---- */
+async function loadModels(){
+  try{
+    const r = await fetch("/api/models");
+    if (!r.ok) return;
+    const ms = await r.json();
+    $("model-count").textContent = ms.length;
+    $("models-body").innerHTML = ms.map((m) => {
+      const caps = [];
+      if (m.reasoning) caps.push("reasoning");
+      if (m.tool_calling) caps.push("tools");
+      return "<tr>"
+        + '<td class="mono">' + esc(m.id) + "</td>"
+        + '<td class="num">' + fmtCtx(m.context_length) + "</td>"
+        + "<td>" + caps.map((c)=>'<span class="badge">'+c+"</span>").join("") + "</td>"
+        + "</tr>";
+    }).join("");
+    $("model-list").innerHTML = ms.map((m)=>'<option value="'+esc(m.id)+'">').join("");
+  }catch(e){ /* bảng giữ trạng thái đang tải */ }
+}
+loadModels();
+
+/* ---- Thử chat: tốn 1 captcha token mỗi lần Gửi ---- */
+$("chat-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const btn = $("chat-send"), out = $("chat-out");
+  const prompt = $("chat-prompt").value;
+  const model = $("chat-model").value.trim();
+  if (!prompt.trim()){
+    out.hidden = false; out.textContent = "Nhập prompt trước đã.";
+    return;
+  }
+  btn.disabled = true;
+  out.hidden = false;
+  out.textContent = "Đang gửi… (lưu ý: tốn 1 captcha token)";
+  const t0 = performance.now();
+  try{
+    const body = { messages: [{role:"user", content:prompt}], stream:false };
+    if (model) body.model = model;
+    const res = await fetch("/v1/chat/completions", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(body),
+    });
+    const raw = await res.text();
+    const dt = ((performance.now()-t0)/1000).toFixed(1);
+    if (!res.ok){
+      out.textContent = "Lỗi " + res.status + " (" + dt + "s):\n" + raw;
+    } else {
+      let text = raw;
+      try{
+        const j = JSON.parse(raw);
+        text = (j.choices && j.choices[0] && j.choices[0].message)
+          ? j.choices[0].message.content ?? raw
+          : raw;
+      }catch(_){ /* không phải JSON → hiển thị thô */ }
+      out.textContent = text + "\n\n— " + dt + "s";
+    }
+  }catch(e){
+    out.textContent = "Lỗi kết nối: " + e;
+  }finally{
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

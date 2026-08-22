@@ -9,6 +9,10 @@
 *.test
 *.out
 
+# Local build artifacts (repo root; *.exe does not match the ~ suffix)
+/nvpi-serve.exe
+/nvpi-serve.exe~
+
 # Chrome headless bundle (272 MB, fetched via scripts/get-chrome-headless-shell.ps1)
 chrome-headless-shell-win64/
 

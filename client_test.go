@@ -109,7 +109,7 @@ func TestApplyDefaultsFillsEmptyKwargs(t *testing.T) {
 }
 
 // buildRequest must route each model to its own NVCF endpoint + function-id, not
-// a single hardcoded GLM endpoint. Pinned to two concrete registry entries so a
+// a single hardcoded endpoint. Pinned to two concrete registry entries so a
 // future scrape that changes their ids is caught here.
 func TestBuildRequestRoutesPerModel(t *testing.T) {
 	client := New(WithCaptchaToken("tok"))
@@ -117,9 +117,9 @@ func TestBuildRequestRoutesPerModel(t *testing.T) {
 		endpoint string
 		fnID     string
 	}{
-		"z-ai/glm-5.2": {
-			"https://api.ngc.nvidia.com/v2/predict/models/qc69jvmznzxy/glm-5.2",
-			"3b9748d8-1d85-40e8-8573-0eeaa63a4b63",
+		"minimaxai/minimax-m3": {
+			"https://api.ngc.nvidia.com/v2/predict/models/qc69jvmznzxy/minimax-m3",
+			"87ea0ddc-cff1-4bca-bf8b-3bd98a35ddd0",
 		},
 		"deepseek-ai/deepseek-v4-pro": {
 			"https://api.ngc.nvidia.com/v2/predict/models/qc69jvmznzxy/deepseek-v4-pro",

@@ -21,6 +21,7 @@ func TestIsHardExtractFailure(t *testing.T) {
 		{fmt.Errorf("sticky execute failed (x); re-navigate failed: y"), true},
 		{fmt.Errorf("hcaptcha global not ready (bot detection or page change?)"), true},
 		{fmt.Errorf("chromedp navigate: timeout"), true},
+		{fmt.Errorf("captcha widget missing (page navigated away or bot wall)"), true},
 		{fmt.Errorf("captcha token did not refresh after execute({async:true})"), true},
 	}
 	for _, tc := range cases {
@@ -39,7 +40,9 @@ func TestBrowserGroupRecycle_CloseDuringFactory(t *testing.T) {
 	g := &BrowserGroup{
 		parent:   context.Background(),
 		browsers: []*Browser{old},
-		free:     make(chan *Browser, 1),
+		busy:     map[*Browser]bool{old: true},
+		lastUsed: map[*Browser]time.Time{old: time.Now()},
+		notify:   make(chan struct{}),
 		done:     make(chan struct{}),
 		browserFactory: func(context.Context, BrowserConfig) (*Browser, error) {
 			close(factoryStarted)
@@ -114,7 +117,9 @@ func TestBrowserGroupRecycle_CloseOutsideLock(t *testing.T) {
 	g := &BrowserGroup{
 		parent:   context.Background(),
 		browsers: []*Browser{old},
-		free:     make(chan *Browser, 1),
+		busy:     map[*Browser]bool{old: true},
+		lastUsed: map[*Browser]time.Time{old: time.Now()},
+		notify:   make(chan struct{}),
 		done:     make(chan struct{}),
 		browserFactory: func(context.Context, BrowserConfig) (*Browser, error) {
 			return candidate, nil
@@ -173,7 +178,9 @@ func TestBrowserGroupRecycle_OnlyOneConcurrentCommit(t *testing.T) {
 	g := &BrowserGroup{
 		parent:   context.Background(),
 		browsers: []*Browser{old},
-		free:     make(chan *Browser, 1),
+		busy:     map[*Browser]bool{old: true},
+		lastUsed: map[*Browser]time.Time{old: time.Now()},
+		notify:   make(chan struct{}),
 		done:     make(chan struct{}),
 		browserFactory: func(context.Context, BrowserConfig) (*Browser, error) {
 			call := factoryCalls.Add(1)

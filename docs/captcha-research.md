@@ -15,13 +15,20 @@ phá**. Có 3 hướng cải thiện, xếp theo ROI:
 Cái A là biggest win — nếu gateway chỉ phục vụ vài người dùng cá nhân, không
 cần pool 3 Chrome chạy 24/7.
 
+> **Quyết định 2026-08-22 (chủ project):** hướng A (nvapi-key) và B (solver
+> trả phí) bị LOẠI vĩnh viễn — mục tiêu project là tránh nvapi-key (rate limit
+> thấp) và giữ 100% miễn phí. Kiến trúc Chrome+hCaptcha pool là đích. Hướng C
+> đã ship phần lớn: stickyMaxIdle 10m, mint batch nhiều widget/tab, Chrome
+> elastic (`-chromes-max`), retry budget tách captcha/ladder, `stale_leases`
+> lộ qua `/api/status`.
+
 ---
 
 ## Hiện trạng (đọc code đã xác minh)
 
 `internal/captcha/` triển khai:
 
-- `Browser` — 1 Chrome headless, 1 sticky tab `build.nvidia.com/z-ai/glm-5.2/playground`.
+- `Browser` — 1 Chrome headless, 1 sticky tab `build.nvidia.com/minimaxai/minimax-m3/playground`.
   Steady-state: `hcaptcha.execute({async:true})` + poll `data-hcaptcha-response` (~300ms).
   Block image/font/css (`extract.go:30-47`), spoof `navigator.webdriver`, UA Chrome 131.
 - `BrowserGroup` — N Chrome song song (multi-tab cùng Chrome **không mount widget**
@@ -99,16 +106,16 @@ pool, chỉ thêm một nguồn token nữa.
 
 Một số tinh chỉnh có thể có giá trị, dựa trên đọc code nhưng **chưa benchmark**:
 
-1. **`stickyMaxIdle` 60s có thể quá ngắn cho workload chat** — user pause mid-chat
-   >60s thì tab sticky bị reset, next extract trả navigate (6-10s) thay execute
-   (300ms). Với Claude Code (long reasoning), tăng lên ~5min đáng thử.
+1. ~~**`stickyMaxIdle` 60s có thể quá ngắn cho workload chat**~~ — ĐÃ LÀM:
+   nâng 10m, đối xứng với `-chrome-idle-recycle 10m`.
 2. **TTL pool 90s vs thực tế:** token ~120s TTL. TNTL 90s an toàn nhưng waste
    ~25% lifetime. Nếu pool turnover cao, tăng TTL ~110s giảm fill rate.
 3. **Reaper interval `ttl/4`** = 22.5s — khá dày, token có thể stale tới 22s
    trước khi reaped. Đặt `min(interval, 10s)` nếu workload latency-sensitive.
-4. **`maxAttempts=3` trong doPredict** khi pool/token invalid — log cho biết
-   nhưng không track ratio. Thêm metric `stale_lease_rate` vào healthz.
-5. **Chrome warm trên 1 model cố định** (`playgroundURL` = glm-5.2) — nếu registry
+4. ~~**`maxAttempts=3` trong doPredict**~~ — ĐÃ LÀM: tách 2 budget
+   (`maxCaptchaRetries=2`, ladder ≤5, worst case 8 send), `stale_leases`
+   đếm riêng và lộ qua `/api/status`.
+5. **Chrome warm trên 1 model cố định** (`playgroundURL` = minimax-m3) — nếu registry
    có nhiều model, mỗi request tới model khác force re-navigate. Cần warm theo
    model hoặc cache sticky tab per model (phức toán hơn).
 

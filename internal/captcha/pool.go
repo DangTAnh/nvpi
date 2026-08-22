@@ -12,9 +12,13 @@ import (
 
 // backoff schedule on extract failure. Starts small, caps so a sustained
 // captcha-block doesn't busy-loop or spam logs. Reset to zero on success.
+// backoffMax was 30s: during a real NVIDIA rate-limit / network outage a worker
+// looped 90s+30s≈120s per mint attempt, relaunching Chrome uselessly while the
+// pool sat empty. 2min backoff stops hammering a known-down endpoint and lets
+// the outage clear (or an operator react) without burning Chrome churn.
 const (
 	backoffMin    = 1 * time.Second
-	backoffMax    = 30 * time.Second
+	backoffMax    = 2 * time.Minute
 	backoffJitter = 250 * time.Millisecond // ±25% via Int63n below
 	// log every N consecutive failures instead of each one, so a persistent
 	// captcha outage does not flood logs.
@@ -73,9 +77,23 @@ func (l *TokenLease) Release() {
 // FIFO (not a channel drain/restore), a full fresh pool truly idles Chrome —
 // see runs/hangbench-2026-07-22.md.
 type Pool struct {
-	extract ExtractFunc
-	size    int
-	ttl     time.Duration
+	extract      ExtractFunc
+	batch        int // >1 with batchExtract enables multi-token minting per visit
+	batchExtract func(ctx context.Context, n int) ([]string, error)
+	size         int
+	ttl          time.Duration
+
+	// ttl adaptive bounds: TTL floats between these based on how often tokens
+	// expire before use. A high stale rate (tokens sitting stale) tightens TTL
+	// so workers serve fresher tokens; a near-zero stale rate loosens TTL to
+	// reduce fill rate. See adjustTTL.
+	ttlMin time.Duration
+	ttlMax time.Duration
+
+	// staleWindow tracks expirations vs usable takes over a sliding window so
+	// adjustTTL can react to workload, not just the cumulative Stats counters.
+	staleWindowExpired uint64
+	staleWindowUsed    uint64
 
 	mu        sync.Mutex
 	tokens    []entry
@@ -92,13 +110,21 @@ type Pool struct {
 	takes   atomic.Uint64
 	errors  atomic.Uint64
 	expired atomic.Uint64
+
+	// staleLeases counts tokens a caller took but Commit rejected as expired —
+	// a separate failure mode from buffer-reaped stale. Exposed via Stats.
+	staleLeases atomic.Uint64
 }
 
-// PoolConfig controls prewarm depth and parallelism.
+// PoolConfig controls prewarm depth and per-visit mint depth.
 type PoolConfig struct {
 	Size    int           // buffered ready tokens (default 2)
 	Workers int           // concurrent extractors (default 1)
-	TTL     time.Duration // max age before a pooled token is discarded (default 90s)
+	TTL     time.Duration // starting max age before discard; floats [60s,115s] adaptively (default 90s)
+	// Batch caps tokens per mint when BatchExtract is set. <=1 or nil
+	// BatchExtract runs the legacy one-token-per-extract path.
+	Batch        int
+	BatchExtract func(ctx context.Context, n int) ([]string, error)
 }
 
 // NewPool starts background workers that keep tokens filled up to Size.
@@ -113,15 +139,35 @@ func NewPool(parent context.Context, extract ExtractFunc, cfg PoolConfig) *Pool 
 	if cfg.TTL <= 0 {
 		cfg.TTL = 90 * time.Second
 	}
+	// Adaptive TTL bounds: TTL floats [60s, 115s]. hCaptcha tokens live ~120s,
+	// so 115s is the safe ceiling; 60s is the floor below which fill rate
+	// busy-loops. Production TTL is clamped to [60s, 115s]; sub-second TTLs
+	// (only seen from unit tests asserting expire/reap behavior) are honored
+	// as-is so the same code path validates both production and tests.
+	ttlMin, ttlMax := 60*time.Second, 115*time.Second
+	if cfg.TTL < time.Second {
+		ttlMin = cfg.TTL
+	} else {
+		if cfg.TTL < ttlMin {
+			cfg.TTL = ttlMin
+		}
+		if cfg.TTL > ttlMax {
+			cfg.TTL = ttlMax
+		}
+	}
 	ctx, cancel := context.WithCancel(parent)
 	p := &Pool{
-		extract: extract,
-		size:    cfg.Size,
-		tokens:  make([]entry, 0, cfg.Size),
-		changed: make(chan struct{}),
-		ttl:     cfg.TTL,
-		ctx:     ctx,
-		cancel:  cancel,
+		extract:      extract,
+		batch:        cfg.Batch,
+		batchExtract: cfg.BatchExtract,
+		size:         cfg.Size,
+		tokens:       make([]entry, 0, cfg.Size),
+		changed:      make(chan struct{}),
+		ttl:          cfg.TTL,
+		ttlMin:       ttlMin,
+		ttlMax:       ttlMax,
+		ctx:          ctx,
+		cancel:       cancel,
 	}
 	for i := 0; i < cfg.Workers; i++ {
 		p.wg.Add(1)
@@ -132,12 +178,63 @@ func NewPool(parent context.Context, extract ExtractFunc, cfg PoolConfig) *Pool 
 	return p
 }
 
+// wantBatch reports how many tokens one mint attempt targets: the configured
+// batch size when batch minting is enabled (BatchExtract set, Batch >= 2),
+// else 1 — the legacy single-token path.
+func (p *Pool) wantBatch() int {
+	if p.batchExtract == nil || p.batch < 2 {
+		return 1
+	}
+	return p.batch
+}
+
 func (p *Pool) worker(id int) {
 	defer p.wg.Done()
 	var consecFailures int
 	for {
-		if !p.reserveSlot() {
+		k, ok := p.reserveSlots(p.wantBatch())
+		if !ok {
 			return
+		}
+
+		if k > 1 {
+			toks, err := p.batchExtract(p.ctx, k)
+			if len(toks) > k {
+				toks = toks[:k] // defensive: a mint must never exceed its reservation
+			}
+			m := len(toks)
+			if err != nil && m == 0 {
+				p.releaseReservations(k)
+				p.errors.Add(1)
+				consecFailures++
+				if p.ctx.Err() != nil {
+					return
+				}
+				if consecFailures == 1 || consecFailures%logEveryNth == 0 {
+					log.Printf("captcha pool worker %d: batch mint failed: %v (consecutive failures=%d, backing off)",
+						id, err, consecFailures)
+				}
+				backoff := backoffFor(consecFailures)
+				select {
+				case <-time.After(backoff):
+				case <-p.ctx.Done():
+					return
+				}
+				continue
+			}
+			consecFailures = 0
+			if err != nil {
+				log.Printf("captcha pool worker %d: batch %d/%d: %v", id, m, k, err)
+			}
+			placed := 0
+			for _, t := range toks {
+				if !p.enqueue(t) {
+					return // pool closing; enqueue already consumed this reservation
+				}
+				placed++
+			}
+			p.releaseReservations(k - placed)
+			continue
 		}
 
 		token, err := p.extract(p.ctx)
@@ -172,25 +269,33 @@ func (p *Pool) worker(id int) {
 	}
 }
 
-// reserveSlot blocks until queue capacity is available, then claims it before
-// extraction. The reservation prevents concurrent workers from over-minting.
-func (p *Pool) reserveSlot() bool {
+// reserveSlots blocks until at least one capacity slot is free, then claims
+// min(k, free) slots before extraction. The reservation prevents concurrent
+// workers from over-minting. A batch shrinks to what fits: it must never
+// overflow the buffer, and waiting for all k slots would stall filling when
+// the pool is nearly full. Returns slots claimed (>= 1); false when closed.
+func (p *Pool) reserveSlots(k int) (int, bool) {
 	for {
 		p.mu.Lock()
 		if p.ctx.Err() != nil {
 			p.mu.Unlock()
-			return false
+			return 0, false
 		}
-		if len(p.tokens)+p.reserved+p.leased < p.size {
-			p.reserved++
+		free := p.size - (len(p.tokens) + p.reserved + p.leased)
+		take := k
+		if take > free {
+			take = free
+		}
+		if take > 0 {
+			p.reserved += take
 			p.mu.Unlock()
-			return true
+			return take, true
 		}
 		changed := p.changed
 		p.mu.Unlock()
 		select {
 		case <-p.ctx.Done():
-			return false
+			return 0, false
 		case <-changed:
 		}
 	}
@@ -199,6 +304,18 @@ func (p *Pool) reserveSlot() bool {
 func (p *Pool) releaseReservation() {
 	p.mu.Lock()
 	p.reserved--
+	p.notifyLocked()
+	p.mu.Unlock()
+}
+
+// releaseReservations returns n unused claimed slots (a batch that minted
+// fewer tokens than it reserved). No-op for n <= 0.
+func (p *Pool) releaseReservations(n int) {
+	if n <= 0 {
+		return
+	}
+	p.mu.Lock()
+	p.reserved -= n
 	p.notifyLocked()
 	p.mu.Unlock()
 }
@@ -224,17 +341,13 @@ func (p *Pool) notifyLocked() {
 	p.changed = make(chan struct{})
 }
 
-// reaper drops expired FIFO-front entries during idle so workers can refill.
+// reaper drops expired FIFO-front entries during idle so workers can refill,
+// and adjusts TTL adaptively each tick: a high stale-to-used ratio tightens TTL
+// (serve fresher tokens at higher fill cost); a near-zero ratio loosens TTL
+// (reduce fill rate). Ticker follows the current TTL so it co-scales with it.
 func (p *Pool) reaper() {
 	defer p.wg.Done()
-	interval := p.ttl / 4
-	if interval > 30*time.Second {
-		interval = 30 * time.Second
-	}
-	if interval < 100*time.Millisecond {
-		interval = 100 * time.Millisecond
-	}
-	t := time.NewTicker(interval)
+	t := time.NewTicker(reaperInterval(p.ttl))
 	defer t.Stop()
 	var lastLog time.Time
 	for {
@@ -243,21 +356,87 @@ func (p *Pool) reaper() {
 			return
 		case <-t.C:
 			n := p.discardStale()
-			if n == 0 {
-				continue
+			if prevTTL, newTTL, adjusted := p.adjustTTL(n); adjusted {
+				// Re-arm the ticker to the new TTL cadence.
+				t.Reset(reaperInterval(newTTL))
+				log.Printf("captcha pool: ttl adapted %.0fs→%.0fs (stale/used=%d/%d, reaped %d); ready=%d",
+					prevTTL.Seconds(), newTTL.Seconds(),
+					p.staleWindowExpired, p.staleWindowUsed, n, p.Ready())
+			} else if n > 0 {
+				if time.Since(lastLog) < time.Minute && p.Ready() > 0 {
+					continue
+				}
+				lastLog = time.Now()
+				log.Printf("captcha pool: reaped %d stale token(s); ready=%d (workers refill)", n, p.Ready())
 			}
-			// Rate-limit: idle pools otherwise log every tick while workers refill.
-			if time.Since(lastLog) < time.Minute && p.Ready() > 0 {
-				continue
-			}
-			lastLog = time.Now()
-			log.Printf("captcha pool: reaped %d stale token(s); ready=%d (workers refill)", n, p.Ready())
 		}
 	}
 }
 
+// reaperInterval ticks at ttl/4, clamped to [10s, 30s] for production TTLs
+// (hCaptcha ~120s). Short-TTL test pools (TTL < 1s) get ttl/4 uncapped to keep
+// reaper fires proportional — otherwise a 200ms TTL with a 10s reaper misses
+// every reap window in the test. The 10s floor avoids busy-loop with TTL=90s.
+func reaperInterval(ttl time.Duration) time.Duration {
+	d := ttl / 4
+	if ttl >= time.Second {
+		if d > 30*time.Second {
+			d = 30 * time.Second
+		}
+		if d < 10*time.Second {
+			d = 10 * time.Second
+		}
+	}
+	return d
+}
+
+// adjustTTL nudges TTL based on the recent stale-to-used ratio. Returns the
+// previous and new TTL, and whether it changed. A stale rate above staleHi
+// tightens TTL (tokens sit unused → serve fresher ones); below staleLo loosens
+// it (tokens get used well before expiring → reduce fill churn). The window
+// resets after each evaluation so the controller reacts to current load, not
+// cumulative lifetime stats.
+//
+// ponytail: single-step P-controller (±10s/tick). Simpler than integral/derivative
+// terms and stable here — the signal (stale rate) is already smoothed by the
+// reaper tick. If TTL oscillates under steady load, add deadband or windowing.
+func (p *Pool) adjustTTL(staleThisTick int) (prev, next time.Duration, adjusted bool) {
+	const (
+		staleHi = 0.30 // >30% stale → tighten
+		staleLo = 0.05 // <5% stale  → loosen
+		step    = 10 * time.Second
+	)
+	// p.ttl is read concurrently by TTL()/Stats() (healthz) — mutate it under
+	// the same mutex those readers take.
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	prev = p.ttl
+	total := p.staleWindowExpired + p.staleWindowUsed
+	if total < 10 {
+		// Too little signal this window to judge — don't thrash TTL on noise.
+		p.staleWindowExpired, p.staleWindowUsed = 0, 0
+		return prev, prev, false
+	}
+	ratio := float64(p.staleWindowExpired) / float64(total)
+	switch {
+	case ratio > staleHi:
+		p.ttl -= step
+	case ratio < staleLo:
+		p.ttl += step
+	}
+	if p.ttl < p.ttlMin {
+		p.ttl = p.ttlMin
+	}
+	if p.ttl > p.ttlMax {
+		p.ttl = p.ttlMax
+	}
+	p.staleWindowExpired, p.staleWindowUsed = 0, 0
+	return prev, p.ttl, p.ttl != prev
+}
+
 // discardStale drops only expired entries from the FIFO front without touching
-// fresh tokens (inspect under mutex — no evacuate/restore race).
+// fresh tokens (inspect under mutex — no evacuate/restore race). Stale drops
+// feed the adaptive window so adjustTTL sees them next tick.
 func (p *Pool) discardStale() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -265,6 +444,7 @@ func (p *Pool) discardStale() int {
 	for len(p.tokens) > 0 && time.Since(p.tokens[0].at) > p.ttl {
 		p.tokens = p.tokens[1:]
 		p.expired.Add(1)
+		p.staleWindowExpired++
 		n++
 	}
 	if n > 0 {
@@ -356,10 +536,12 @@ func (p *Pool) finalizeLease(e entry, release bool) bool {
 	if !release {
 		if time.Since(e.at) > p.ttl {
 			p.expired.Add(1)
+			p.staleLeases.Add(1)
 			p.notifyLocked()
 			return false
 		}
 		p.takes.Add(1)
+		p.staleWindowUsed++
 		p.notifyLocked()
 		return true
 	}
@@ -384,16 +566,31 @@ func (p *Pool) finalizeLease(e entry, release bool) bool {
 	return false
 }
 
-// Stats returns fill/take/error/expired counters for experiments.
-func (p *Pool) Stats() (fills, takes, errors, expired uint64) {
-	return p.fills.Load(), p.takes.Load(), p.errors.Load(), p.expired.Load()
-}
-
 // Ready returns how many tokens are currently buffered (may include soon-to-expire).
 func (p *Pool) Ready() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.tokens)
+}
+
+// TTL returns the current adaptive TTL.
+func (p *Pool) TTL() time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.ttl
+}
+
+// Stats returns fill/take/error/expired/staleLeases counters and current TTL.
+func (p *Pool) Stats() (fills, takes, errors, expired, staleLeases uint64, ttl time.Duration) {
+	fills = p.fills.Load()
+	takes = p.takes.Load()
+	errors = p.errors.Load()
+	expired = p.expired.Load()
+	staleLeases = p.staleLeases.Load()
+	p.mu.Lock()
+	ttl = p.ttl
+	p.mu.Unlock()
+	return fills, takes, errors, expired, staleLeases, ttl
 }
 
 // Close stops workers and drains the browser-facing extract loop.

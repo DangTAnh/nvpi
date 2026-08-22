@@ -27,4 +27,3 @@ func TestBackoffForGrowsAndCaps(t *testing.T) {
 		t.Fatalf("n=20 backoff=%s did not reach cap %s", capped, backoffMax)
 	}
 }
-

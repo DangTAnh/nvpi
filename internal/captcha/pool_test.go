@@ -38,7 +38,7 @@ func TestPoolTakeBlocksUntilFilled(t *testing.T) {
 		t.Fatal("empty token")
 	}
 
-	fills, takes, errs, expired := p.Stats()
+	fills, takes, errs, expired, _, _ := p.Stats()
 	if takes != 1 {
 		t.Fatalf("takes=%d want 1", takes)
 	}
@@ -86,7 +86,7 @@ func TestPoolDiscardsExpired(t *testing.T) {
 		t.Fatal("empty token")
 	}
 
-	_, _, _, expired := p.Stats()
+	_, _, _, expired, _, _ := p.Stats()
 	if expired < 1 {
 		t.Fatalf("expired=%d want >=1", expired)
 	}
@@ -129,18 +129,18 @@ func TestPoolReapsStaleDuringIdle(t *testing.T) {
 	if p.Ready() < 2 {
 		t.Fatal("pool never filled")
 	}
-	fillsBefore, _, _, _ := p.Stats()
+	fillsBefore, _, _, _, _, _ := p.Stats()
 
 	// Past hard TTL and several reaper ticks (ttl/4, min 100ms).
 	deadline = time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		fills, _, _, expired := p.Stats()
+		fills, _, _, expired, _, _ := p.Stats()
 		if expired >= 1 && fills > fillsBefore {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	fillsAfter, _, _, expired := p.Stats()
+	fillsAfter, _, _, expired, _, _ := p.Stats()
 	t.Fatalf("idle reap did not refresh: fills %d→%d expired=%d ready=%d",
 		fillsBefore, fillsAfter, expired, p.Ready())
 }
@@ -166,14 +166,14 @@ func TestPoolReaperNoChurnWhileFresh(t *testing.T) {
 	if p.Ready() < 2 {
 		t.Fatal("pool never filled")
 	}
-	fillsBefore, _, _, _ := p.Stats()
+	fillsBefore, _, _, _, _, _ := p.Stats()
 
 	// Several reaper ticks (ttl/4 = 1.25s, capped logic → 1.25s) while still fresh.
 	time.Sleep(800 * time.Millisecond)
 	_ = p.discardStale() // force one pass
 	time.Sleep(200 * time.Millisecond)
 
-	fillsAfter, takes, _, expired := p.Stats()
+	fillsAfter, takes, _, expired, _, _ := p.Stats()
 	if takes != 0 {
 		t.Fatalf("takes=%d want 0", takes)
 	}
@@ -304,7 +304,7 @@ func TestPoolTokenLease_ReleaseRestoresEntry(t *testing.T) {
 	if got := p.Ready(); got != 2 {
 		t.Fatalf("ready=%d want 2 after release", got)
 	}
-	_, takes, _, _ := p.Stats()
+	_, takes, _, _, _, _ := p.Stats()
 	if takes != 0 {
 		t.Fatalf("takes=%d want 0 after release", takes)
 	}
@@ -316,7 +316,7 @@ func TestPoolTokenLease_ReleaseRestoresEntry(t *testing.T) {
 	if token != "oldest" {
 		t.Fatalf("Take=%q want oldest (original FIFO order)", token)
 	}
-	_, takes, _, _ = p.Stats()
+	_, takes, _, _, _, _ = p.Stats()
 	if takes != 1 {
 		t.Fatalf("takes=%d want 1 after Take commits lease", takes)
 	}
@@ -434,7 +434,7 @@ func TestPoolTokenLease_FinalizeOnce(t *testing.T) {
 			if total > p.size {
 				t.Fatalf("capacity=%d exceeds size=%d", total, p.size)
 			}
-			_, takes, _, _ := p.Stats()
+			_, takes, _, _, _, _ := p.Stats()
 			if takes > 1 {
 				t.Fatalf("takes=%d want <=1", takes)
 			}
@@ -456,7 +456,7 @@ func TestPoolTokenLease_ExpiredReleaseIsDiscarded(t *testing.T) {
 	if got := p.Ready(); got != 0 {
 		t.Fatalf("ready=%d want 0", got)
 	}
-	_, takes, _, expired := p.Stats()
+	_, takes, _, expired, _, _ := p.Stats()
 	if takes != 0 {
 		t.Fatalf("takes=%d want 0", takes)
 	}
@@ -477,7 +477,7 @@ func TestPoolTokenLease_CommitRejectsTokenExpiredWhileLeased(t *testing.T) {
 		t.Fatal("Commit succeeded for token expired while leased")
 	}
 
-	_, takes, _, expired := p.Stats()
+	_, takes, _, expired, _, _ := p.Stats()
 	if takes != 0 {
 		t.Fatalf("takes=%d want 0 for token expired before commit", takes)
 	}
@@ -536,6 +536,111 @@ func TestPoolTokenLease_ReleaseAfterCloseIsDiscarded(t *testing.T) {
 	p.mu.Unlock()
 	if leased != 0 {
 		t.Fatalf("leased=%d want 0", leased)
+	}
+}
+
+// --- batch minting ---
+
+// A batch must never overflow the buffer even though it wants more slots than
+// exist: reserveSlots shrinks the claim to what fits.
+func TestPoolBatchFillsWithoutOverflow(t *testing.T) {
+	var minted atomic.Int32
+	batch := func(ctx context.Context, n int) ([]string, error) {
+		toks := make([]string, n)
+		for i := range toks {
+			toks[i] = fmt.Sprintf("tok-%d", minted.Add(1))
+		}
+		return toks, nil
+	}
+	single := func(context.Context) (string, error) {
+		return "", fmt.Errorf("single path must not run when batch is enabled")
+	}
+	p := NewPool(context.Background(), single, PoolConfig{Size: 3, Workers: 2, Batch: 3, BatchExtract: batch})
+	defer p.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for p.Ready() < 3 && time.Now().Before(deadline) {
+		p.mu.Lock()
+		capacity := len(p.tokens) + p.reserved + p.leased
+		p.mu.Unlock()
+		if capacity > 3 {
+			t.Fatalf("capacity=%d exceeds size=3", capacity)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := p.Ready(); got != 3 {
+		t.Fatalf("ready=%d want 3", got)
+	}
+	fills, _, errs, _, _, _ := p.Stats()
+	if fills < 3 {
+		t.Fatalf("fills=%d want >=3", fills)
+	}
+	if errs != 0 {
+		t.Fatalf("errors=%d want 0", errs)
+	}
+}
+
+// A partially successful batch keeps its tokens flowing and does not count as
+// an extract error — only zero-token mints do.
+func TestPoolBatchPartialKeepsTokens(t *testing.T) {
+	var calls atomic.Int32
+	batch := func(ctx context.Context, n int) ([]string, error) {
+		k := calls.Add(1)
+		if k == 1 && n > 1 {
+			return []string{"tok-partial"}, fmt.Errorf("widget 2 died")
+		}
+		toks := make([]string, n)
+		for i := range toks {
+			toks[i] = fmt.Sprintf("tok-%d", k*100+int32(i))
+		}
+		return toks, nil
+	}
+	p := NewPool(context.Background(), func(context.Context) (string, error) {
+		return "", fmt.Errorf("unused")
+	}, PoolConfig{Size: 3, Workers: 1, Batch: 3, BatchExtract: batch})
+	defer p.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for p.Ready() < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := p.Ready(); got != 3 {
+		t.Fatalf("ready=%d want 3 (partial batch must not stall filling)", got)
+	}
+	_, _, errs, _, _, _ := p.Stats()
+	if errs != 0 {
+		t.Fatalf("errors=%d want 0 (partial success is not an error)", errs)
+	}
+}
+
+// A fully failed batch frees its reserved slots immediately (no slot leak into
+// backoff) and counts one error.
+func TestPoolBatchFailureReleasesReservations(t *testing.T) {
+	batch := func(ctx context.Context, n int) ([]string, error) {
+		return nil, fmt.Errorf("mint down")
+	}
+	p := NewPool(context.Background(), func(context.Context) (string, error) {
+		return "", fmt.Errorf("unused")
+	}, PoolConfig{Size: 2, Workers: 1, Batch: 2, BatchExtract: batch})
+	defer p.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_, _, errs, _, _, _ := p.Stats()
+		if errs >= 1 {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatal("batch failure never surfaced as an error")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond) // let the worker reach its backoff sleep
+	p.mu.Lock()
+	reserved := p.reserved
+	p.mu.Unlock()
+	if reserved != 0 {
+		t.Fatalf("reserved=%d want 0 (failed batch leaked slots)", reserved)
 	}
 }
 

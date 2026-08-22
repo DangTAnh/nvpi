@@ -72,8 +72,8 @@ func receiveTestValue[T any](t *testing.T, ch <-chan T, name string) T {
 
 func leaseTestRequest() (clipexec.Request, clipexec.Options) {
 	return clipexec.Request{
-		Model:   "z-ai/glm-5.2",
-		Payload: []byte(`{"model":"z-ai/glm-5.2","messages":[{"role":"user","content":"hi"}]}`),
+		Model:   "minimaxai/minimax-m3",
+		Payload: []byte(`{"model":"minimaxai/minimax-m3","messages":[{"role":"user","content":"hi"}]}`),
 	}, clipexec.Options{SourceFormat: sdktranslator.FormatOpenAI}
 }
 
@@ -159,6 +159,92 @@ func TestIsRetryableCaptchaFailure(t *testing.T) {
 	}
 }
 
+func TestLooksLikeEffortError(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+		want bool
+	}{
+		{name: "bare tier retries", msg: `unsupported reasoning_effort: high`, want: true},
+		{name: "case insensitive", msg: `Reasoning Effort XHIGH unsupported by this model`, want: true},
+		{name: "none tier retries", msg: `reasoning_effort 'none' is not supported for this model`, want: true},
+		{name: "maximum rejected by word boundary", msg: `reasoning_effort 'maximum' not supported`, want: false},
+		{name: "allow/below rejected by word boundary", msg: `messages below the allowed length for reasoning`, want: false},
+		{name: "no reasoning word", msg: `field 'tools' has an error: missing required property`, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := looksLikeEffortError(tc.msg); got != tc.want {
+				t.Fatalf("got %v want %v (msg=%q)", got, tc.want, tc.msg)
+			}
+		})
+	}
+}
+
+func TestExecute_staleCaptchaBudgetSurfacesUnauthorized(t *testing.T) {
+	pool, extracts := newExecutorLeasePool(t, "bad", "bad", "bad")
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"requestStatus":{"statusCode":"INVALID_REQUEST","statusDescription":"Token is invalid"}}`))
+	}))
+	defer up.Close()
+	e := NewExecutor(Options{
+		Pool:       pool,
+		HTTPClient: up.Client(),
+		PredictURL: func(models.ModelInfo) string { return up.URL },
+	})
+	req, opts := leaseTestRequest()
+
+	_, err := e.Execute(t.Context(), nil, req, opts)
+
+	var authErr *coreauth.Error
+	if !errors.As(err, &authErr) {
+		t.Fatalf("error type=%T want *coreauth.Error", err)
+	}
+	if authErr.HTTPStatus != http.StatusUnauthorized {
+		t.Fatalf("status=%d want %d (msg=%q)", authErr.HTTPStatus, http.StatusUnauthorized, authErr.Message)
+	}
+	if got := extracts.Load(); got != 3 {
+		t.Fatalf("extracts=%d want 3 (initial send + %d captcha retries)", got, maxCaptchaRetries)
+	}
+}
+
+func TestExecute_defaultModelRewritesUnknownModel(t *testing.T) {
+	// Given: -default-model is set and Claude Code sends its builtin name.
+	var gotModel string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotModel = body.Model
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"1","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer up.Close()
+	e := NewExecutor(Options{
+		DefaultModel: "minimaxai/minimax-m3",
+		FlagCaptcha:  "test-token",
+		HTTPClient:   up.Client(),
+		PredictURL:   func(models.ModelInfo) string { return up.URL },
+	})
+
+	resp, err := e.Execute(context.Background(), nil, clipexec.Request{
+		Model:   "claude-sonnet-4-20250514",
+		Payload: []byte(`{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"hi"}]}`),
+	}, clipexec.Options{SourceFormat: sdktranslator.FormatOpenAI})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotModel != "minimaxai/minimax-m3" {
+		t.Fatalf("upstream model=%q want fallback", gotModel)
+	}
+	if !strings.Contains(string(resp.Payload), "ok") {
+		t.Fatalf("payload=%s", resp.Payload)
+	}
+}
+
 func TestAcquireInflight(t *testing.T) {
 	e := NewExecutor(Options{MaxInflight: 1, InflightWait: 0})
 	rel1, err := e.acquireInflight(context.Background())
@@ -213,7 +299,7 @@ func TestExecuteStreamMockUpstream(t *testing.T) {
 	}))
 	defer up.Close()
 
-	info, err := models.Lookup("z-ai/glm-5.2")
+	info, err := models.Lookup("minimaxai/minimax-m3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,8 +311,8 @@ func TestExecuteStreamMockUpstream(t *testing.T) {
 	})
 
 	stream, err := e.ExecuteStream(context.Background(), nil, clipexec.Request{
-		Model:   "z-ai/glm-5.2",
-		Payload: []byte(`{"model":"z-ai/glm-5.2","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+		Model:   "minimaxai/minimax-m3",
+		Payload: []byte(`{"model":"minimaxai/minimax-m3","messages":[{"role":"user","content":"hi"}],"stream":true}`),
 	}, clipexec.Options{
 		Stream:       true,
 		SourceFormat: sdktranslator.FormatOpenAI,
@@ -612,8 +698,8 @@ func TestExecutePoolLease_RetryableCaptchaUsesFreshToken(t *testing.T) {
 }
 
 func TestTranslatorClaudeToOpenAIChatShape(t *testing.T) {
-	claude := []byte(`{"model":"z-ai/glm-5.2","max_tokens":64,"messages":[{"role":"user","content":"Hi"}],"stream":false}`)
-	out := sdktranslator.TranslateRequest(sdktranslator.FormatClaude, sdktranslator.FormatOpenAI, "z-ai/glm-5.2", claude, false)
+	claude := []byte(`{"model":"minimaxai/minimax-m3","max_tokens":64,"messages":[{"role":"user","content":"Hi"}],"stream":false}`)
+	out := sdktranslator.TranslateRequest(sdktranslator.FormatClaude, sdktranslator.FormatOpenAI, "minimaxai/minimax-m3", claude, false)
 	if len(out) == 0 {
 		t.Fatal("empty translation")
 	}
@@ -624,14 +710,14 @@ func TestTranslatorClaudeToOpenAIChatShape(t *testing.T) {
 	if _, ok := raw["messages"]; !ok {
 		t.Fatalf("expected messages in openai chat shape, got %s", out)
 	}
-	if raw["model"] != "z-ai/glm-5.2" {
+	if raw["model"] != "minimaxai/minimax-m3" {
 		t.Fatalf("model=%v", raw["model"])
 	}
 }
 
 func TestTranslatorResponsesToOpenAIChatShape(t *testing.T) {
-	responses := []byte(`{"model":"z-ai/glm-5.2","input":"Hi","stream":false}`)
-	out := sdktranslator.TranslateRequest(sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI, "z-ai/glm-5.2", responses, false)
+	responses := []byte(`{"model":"minimaxai/minimax-m3","input":"Hi","stream":false}`)
+	out := sdktranslator.TranslateRequest(sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI, "minimaxai/minimax-m3", responses, false)
 	if len(out) == 0 {
 		t.Fatal("empty translation")
 	}
@@ -661,7 +747,7 @@ func TestRegistryModelsSorted(t *testing.T) {
 		}
 		byID[m.ID] = true
 	}
-	for _, want := range []string{"z-ai/glm-5.2", "deepseek-ai/deepseek-v4-pro"} {
+	for _, want := range []string{"minimaxai/minimax-m3", "deepseek-ai/deepseek-v4-pro"} {
 		if !byID[want] {
 			t.Errorf("missing %q", want)
 		}
@@ -689,8 +775,8 @@ func TestExecuteUsesHeaderCaptcha(t *testing.T) {
 	hdr := make(http.Header)
 	hdr.Set("nv-captcha-token", "from-header")
 	resp, err := e.Execute(context.Background(), nil, clipexec.Request{
-		Model:   "z-ai/glm-5.2",
-		Payload: []byte(`{"model":"z-ai/glm-5.2","messages":[{"role":"user","content":"hi"}]}`),
+		Model:   "minimaxai/minimax-m3",
+		Payload: []byte(`{"model":"minimaxai/minimax-m3","messages":[{"role":"user","content":"hi"}]}`),
 	}, clipexec.Options{
 		SourceFormat: sdktranslator.FormatOpenAI,
 		Headers:      hdr,
@@ -700,48 +786,6 @@ func TestExecuteUsesHeaderCaptcha(t *testing.T) {
 	}
 	if !strings.Contains(string(resp.Payload), "hi") {
 		t.Fatalf("payload=%s", resp.Payload)
-	}
-}
-
-func TestExecuteTranslatesReasoningEffortForUpstreamModel(t *testing.T) {
-	var upstreamBody map[string]any
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
-			t.Errorf("decode upstream request: %v", err)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"1","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
-	}))
-	defer up.Close()
-
-	executor := NewExecutor(Options{
-		FlagCaptcha: "test-token",
-		HTTPClient:  up.Client(),
-		PredictURL:  func(models.ModelInfo) string { return up.URL },
-	})
-	_, err := executor.Execute(context.Background(), nil, clipexec.Request{
-		Model: "deepseek-ai/deepseek-v4-pro",
-		Payload: []byte(`{
-			"model":"deepseek-ai/deepseek-v4-pro",
-			"messages":[{"role":"user","content":"solve"}],
-			"reasoning_effort":"xhigh"
-		}`),
-	}, clipexec.Options{SourceFormat: sdktranslator.FormatOpenAI})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	kwargs, ok := upstreamBody["chat_template_kwargs"].(map[string]any)
-	if !ok {
-		t.Fatalf("upstream chat_template_kwargs missing: %#v", upstreamBody)
-	}
-	if got := kwargs["reasoning_effort"]; got != "max" {
-		t.Fatalf("upstream reasoning_effort=%#v want max", got)
-	}
-	if _, ok := upstreamBody["reasoning_effort"]; ok {
-		t.Fatalf("generic reasoning_effort leaked upstream: %#v", upstreamBody)
 	}
 }
 
@@ -766,9 +810,9 @@ func TestExecute_sendsResponsesSamplingFieldsToPlayground(t *testing.T) {
 
 	// When: a Responses request uses Chat-compatible sampling and attribution fields.
 	_, err := executor.Execute(context.Background(), nil, clipexec.Request{
-		Model: "z-ai/glm-5.2",
+		Model: "minimaxai/minimax-m3",
 		Payload: []byte(`{
-			"model":"z-ai/glm-5.2",
+			"model":"minimaxai/minimax-m3",
 			"input":"hello",
 			"temperature":0.25,
 			"top_p":0.8,
@@ -815,9 +859,9 @@ func TestExecute_forwardsResponsesStoreWithoutRejecting(t *testing.T) {
 
 	// When: a Responses request includes store (unsupported by NVIDIA, but must not be rejected).
 	_, err := executor.Execute(context.Background(), nil, clipexec.Request{
-		Model: "z-ai/glm-5.2",
+		Model: "minimaxai/minimax-m3",
 		Payload: []byte(`{
-			"model":"z-ai/glm-5.2",
+			"model":"minimaxai/minimax-m3",
 			"input":"hello",
 			"store":true
 		}`),

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// Fixtures captured from api.ngc.nvidia.com playground predict (z-ai/glm-5.2).
+// Fixtures captured from api.ngc.nvidia.com playground predict (minimaxai/minimax-m3).
 
 const fixtureNonStreamCold = `{
   "choices": [
@@ -22,7 +22,7 @@ const fixtureNonStreamCold = `{
   ],
   "created": 1784881313,
   "id": "chatcmpl-5fef88e4-45d9-46d8-82c0-6039b34997b3",
-  "model": "z-ai/glm-5.2",
+  "model": "minimaxai/minimax-m3",
   "object": "chat.completion",
   "service_tier": null,
   "system_fingerprint": null,
@@ -48,7 +48,7 @@ const fixtureNonStreamThinking = `{
   ],
   "created": 1784881374,
   "id": "chatcmpl-0d99b044-95b7-49d1-b285-7462294364fe",
-  "model": "z-ai/glm-5.2",
+  "model": "minimaxai/minimax-m3",
   "object": "chat.completion",
   "service_tier": null,
   "system_fingerprint": null,
@@ -73,7 +73,7 @@ const fixtureStreamDelta = `{
   ],
   "created": 1784881325,
   "id": "chatcmpl-198f4acd-4e2a-4ffd-b665-fea0bd1f8ac6",
-  "model": "z-ai/glm-5.2",
+  "model": "minimaxai/minimax-m3",
   "object": "chat.completion.chunk",
   "service_tier": null,
   "system_fingerprint": null,
@@ -84,7 +84,7 @@ const fixtureStreamUsageCached = `{
   "choices": [],
   "created": 1784880000,
   "id": "chatcmpl-cache-hit",
-  "model": "z-ai/glm-5.2",
+  "model": "minimaxai/minimax-m3",
   "object": "chat.completion.chunk",
   "service_tier": null,
   "system_fingerprint": null,

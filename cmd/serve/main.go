@@ -12,7 +12,7 @@
 // Usage:
 //
 //	go run ./cmd/serve -auto
-//	go run ./cmd/serve -auto -pool-size=2 -pool-workers=1 -coalesce-ms=0 -max-inflight=8
+//	go run ./cmd/serve -auto -pool-size=6 -pool-workers=3 -pool-batch=3 -coalesce-ms=0 -max-inflight=8
 //	go run ./cmd/serve -captcha "P1_..."
 package main
 
@@ -27,9 +27,11 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"glm52-nvidia/internal/captcha"
+	"glm52-nvidia/internal/models"
 	"glm52-nvidia/internal/provider/nvidia"
 
 	"github.com/gin-gonic/gin"
@@ -45,18 +47,30 @@ import (
 var version = "dev"
 
 func main() {
-	addr := flag.String("addr", ":8080", "listen address")
+	start := time.Now()
+
+	// Loopback by default: this gateway is unauthenticated, so binding all
+	// interfaces invites the LAN to burn the captcha pool. Dockerfile and
+	// docker-compose pass "-addr :8080" explicitly, so they still expose it.
+	addr := flag.String("addr", "127.0.0.1:8080", "listen address (default loopback: unauthenticated gateway; pass \"-addr :8080\" or use Docker/compose, which set it explicitly, to expose)")
 	captchaFlag := flag.String("captcha", "", "one-shot hCaptcha token (consumed on first use)")
 	auto := flag.Bool("auto", false, "prewarm captcha tokens via shared Chrome + pool")
 	poolSize := flag.Int("pool-size", 3, "ready captcha tokens to keep buffered (-auto)")
-	poolWorkers := flag.Int("pool-workers", 1, "concurrent captcha extractors / Chrome processes (-auto); each worker owns one Chrome")
-	maxInflight := flag.Int("max-inflight", 4, "max concurrent upstream streams (0=unlimited)")
+	poolWorkers := flag.Int("pool-workers", 3, "concurrent captcha mint workers (-auto); set >= -chromes-max so bursts can drive every Chrome; blocked-on-browser workers cost nothing")
+	poolBatch := flag.Int("pool-batch", 3, "captcha tokens minted per Chrome visit (extra invisible hCaptcha widgets rendered on the sticky tab); 1 = one token per visit")
+	chromesMax := flag.Int("chromes-max", 3, "elastic Chrome ceiling (-auto): group starts with 1 Chrome and spawns more under borrow pressure up to this; 1 = fixed single Chrome")
+	chromeIdleRecycle := flag.Duration("chrome-idle-recycle", 10*time.Minute, "close Chromes idle longer than this (-auto elastic), keeping at least 1; 10min matches sticky-tab staleness so recycling loses nothing")
+	maxInflight := flag.Int("max-inflight", 8, "max concurrent upstream streams (0=unlimited); 8 absorbs Claude Code parallel tool-call bursts — overflow queues at TakeLease instead of failing hard")
 	inflightWait := flag.Duration("inflight-wait", 500*time.Millisecond, "how long to wait for an in-flight slot before returning 503 (0=reject immediately)")
 	coalesceMs := flag.Int("coalesce-ms", 16, "merge consecutive SSE content deltas within this window (0=off); first token always flushes immediately")
 	warmTimeout := flag.Duration("warm-timeout", 3*time.Minute, "wait for at least one pooled captcha before serving (-auto); 0=skip")
 	poolTTL := flag.Duration("pool-ttl", 90*time.Second, "discard pooled captcha tokens older than this (-auto)")
 	captchaWait := flag.Duration("captcha-wait", 30*time.Second, "max wait for a pooled captcha token per request (0=block until ready); then 503")
 	chromeProxy := flag.String("chrome-proxy", "", "proxy for captcha Chrome and upstream API (e.g. socks5://host:port); falls back to CHROME_PROXY")
+	captchaPlayground := flag.String("captcha-playground", "https://build.nvidia.com/minimaxai/minimax-m3/playground", "playground URL used to mint hCaptcha tokens (one Chrome sticky tab)")
+	defaultModel := flag.String("default-model", "", "rewrite unknown requested models (e.g. Claude Code's builtin claude-*) to this registered model instead of rejecting with 400; empty = strict")
+	refreshRegistry := flag.Bool("refresh-registry", true, "re-fetch the model registry from upstream catalog at startup (falls back to hardcoded list on failure)")
+	registryTimeout := flag.Duration("registry-timeout", 30*time.Second, "timeout for the startup registry refresh")
 	flag.Parse()
 
 	if !*auto && *captchaFlag == "" {
@@ -93,8 +107,30 @@ func main() {
 		ResponseHeaderTimeout: 120 * time.Second,
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	// SIGTERM too: Docker stop / systemd send TERM, not INT. Without it the
+	// graceful path (pool.Close, browser.Close, svc.Run return) never runs and
+	// the container eats the full SIGKILL grace period with Chromes unclean.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Re-fetch the model registry from the upstream NVIDIA catalog so newly
+	// added / retired models show up without a rebuild. Best-effort: failure
+	// logs and the hardcoded registry stays in place.
+	if *refreshRegistry {
+		// Route the refresh through the same proxy the executor transport
+		// uses; in proxy-only networks a plain client can never reach the
+		// upstream catalog.
+		res, err := models.Refresh(ctx, models.RefreshOptions{
+			Timeout:    *registryTimeout,
+			HTTPClient: &http.Client{Timeout: 15 * time.Second, Transport: transport},
+		})
+		if err != nil {
+			log.Printf("models: refresh failed (%v) — keeping hardcoded registry (%d models)", err, len(models.Models))
+		} else {
+			log.Printf("models: refreshed %d/%d (probed=%d skipped=%d withCaps=%d) in %s",
+				res.OK, res.Listed, res.Probed, res.Skipped, res.WithCaps, res.Duration.Round(time.Millisecond))
+		}
+	}
 
 	var (
 		browser *captcha.BrowserGroup
@@ -102,23 +138,27 @@ func main() {
 	)
 	if *auto {
 		var err error
-		browser, err = captcha.NewBrowserGroup(ctx, *poolWorkers, captcha.BrowserConfig{
-			Proxy: proxyURL,
+		browser, err = captcha.NewBrowserGroup(ctx, 1, captcha.BrowserConfig{
+			Proxy:      proxyURL,
+			Playground: *captchaPlayground,
 		})
 		if err != nil {
 			log.Fatalf("captcha browser: %v", err)
 		}
+		browser.EnableElastic(*chromesMax, *chromeIdleRecycle)
 		pool = captcha.NewPool(ctx, browser.Extract, captcha.PoolConfig{
-			Size:    *poolSize,
-			Workers: *poolWorkers,
-			TTL:     *poolTTL,
+			Size:         *poolSize,
+			Workers:      *poolWorkers,
+			TTL:          *poolTTL,
+			Batch:        *poolBatch,
+			BatchExtract: browser.ExtractBatch,
 		})
 		defer func() {
 			pool.Close()
 			browser.Close()
 		}()
-		log.Printf("captcha pool: size=%d workers=%d chromes=%d ttl=%s captcha-wait=%s",
-			*poolSize, *poolWorkers, browser.Len(), *poolTTL, *captchaWait)
+		log.Printf("captcha pool: size=%d workers=%d batch=%d chromes=%d/%d ttl=%s captcha-wait=%s",
+			*poolSize, *poolWorkers, *poolBatch, browser.Len(), *chromesMax, *poolTTL, *captchaWait)
 
 		if *warmTimeout > 0 {
 			log.Printf("warming captcha pool (timeout=%s)…", *warmTimeout)
@@ -137,6 +177,7 @@ func main() {
 		MaxInflight:  *maxInflight,
 		InflightWait: *inflightWait,
 		CaptchaWait:  *captchaWait,
+		DefaultModel: *defaultModel,
 		HTTPClient:   &http.Client{Timeout: 0, Transport: transport},
 		Pool:         pool,
 	})
@@ -186,6 +227,19 @@ func main() {
 				engine.GET("/hello", func(c *gin.Context) {
 					c.JSON(http.StatusOK, gin.H{"hello": "nvpi"})
 				})
+				registerAPIHello(engine)
+				registerWeb(engine, WebDeps{
+					Version:     version,
+					Start:       start,
+					Auto:        *auto,
+					Pool:        pool,
+					Browser:     browser,
+					ChromesMax:  *chromesMax,
+					MaxInflight: *maxInflight,
+					CoalesceMs:  *coalesceMs,
+					PoolSize:    *poolSize,
+					PoolBatch:   *poolBatch,
+				})
 				engine.Use(func(c *gin.Context) {
 					if c.Request.URL.Path != "/healthz" {
 						c.Next()
@@ -198,13 +252,27 @@ func main() {
 					case http.MethodGet:
 						out := gin.H{"ok": true}
 						if p := exec.Pool(); p != nil {
-							fills, takes, errs, expired := p.Stats()
+							fills, takes, errs, expired, staleLeases, ttl := p.Stats()
+							// nav/sticky counters live on the Chrome group, not
+							// the token pool; zero when -auto is off.
+							var navCount, stickyCount uint64
+							if browser != nil {
+								navCount = browser.NavCount()
+								stickyCount = browser.StickyCount()
+							}
 							out["pool"] = gin.H{
-								"ready":   p.Ready(),
-								"fills":   fills,
-								"takes":   takes,
-								"errors":  errs,
-								"expired": expired,
+								"ready":       p.Ready(),
+								"fills":       fills,
+								"takes":       takes,
+								"errors":      errs,
+								"expired":     expired,
+								"staleLeases": staleLeases,
+								"ttlSec":      int(ttl.Seconds()),
+								// Live Chrome-process count (elastic group scales
+								// between 1 and -chromes-max under load).
+								"chromes":     browserChromeCount(browser),
+								"navCount":    navCount,
+								"stickyCount": stickyCount,
 							}
 						}
 						c.JSON(http.StatusOK, out)
@@ -228,6 +296,15 @@ func main() {
 
 func execCoalesce(ms int) time.Duration {
 	return time.Duration(ms) * time.Millisecond
+}
+
+// browserChromeCount is the live Chrome-process count for healthz; nil-safe
+// (zero when -auto is off).
+func browserChromeCount(browser *captcha.BrowserGroup) int {
+	if browser == nil {
+		return 0
+	}
+	return browser.Len()
 }
 
 func waitPoolReady(ctx context.Context, pool *captcha.Pool, want int, timeout time.Duration) error {

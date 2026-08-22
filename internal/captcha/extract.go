@@ -9,7 +9,11 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
-const playgroundURL = "https://build.nvidia.com/z-ai/glm-5.2/playground"
+const (
+	// playgroundURL is the default NVIDIA Playground URL for the default model
+	// (MiniMax M3). Can be overridden via BrowserConfig.Playground.
+	playgroundURL = "https://build.nvidia.com/minimaxai/minimax-m3/playground"
+)
 
 // Extract is a one-shot helper: start Chrome, scrape one token, shut down.
 // Prefer Browser + Pool for concurrent serving.
@@ -44,7 +48,8 @@ var blockedAssetPatterns = []*network.BlockPattern{
 	{URLPattern: "*://*:*/*.ico", Block: true},
 }
 
-func warmPlayground(ctx context.Context) error {
+// warmPlayground navigates to the playground and waits for hCaptcha to be ready.
+func warmPlayground(ctx context.Context, playgroundURL string) error {
 	return chromedp.Run(ctx,
 		network.Enable(),
 		network.SetBlockedURLs().WithURLPatterns(blockedAssetPatterns),
@@ -56,8 +61,8 @@ func warmPlayground(ctx context.Context) error {
 	)
 }
 
-func navigateAndExecute(ctx context.Context) (string, error) {
-	if err := warmPlayground(ctx); err != nil {
+func navigateAndExecute(ctx context.Context, playgroundURL string) (string, error) {
+	if err := warmPlayground(ctx, playgroundURL); err != nil {
 		return "", fmt.Errorf("chromedp navigate: %w", err)
 	}
 	return executeOnly(ctx)
@@ -66,13 +71,27 @@ func navigateAndExecute(ctx context.Context) (string, error) {
 // executeOnly assumes the sticky tab is already on the playground with hCaptcha ready.
 // Mirrors NVIDIA Playground: execute({async:true}) then read response (no reset).
 // chromedp cannot await that Promise, so we fire execute and poll the attribute.
+// widgetMissingSentinel is what the entry-read JS returns when the hCaptcha
+// widget element is gone from the page. A real response token is ~1.9KB of
+// base64-ish text, so this collision-free marker lets executeOnly fail fast
+// instead of polling 30s for a token that can never arrive.
+// ponytail: string sentinel over a second DOM-probe Evaluate roundtrip; if a
+// site change ever puts this exact text in the attribute, widen the marker.
+const widgetMissingSentinel = "<<hcaptcha-widget-missing>>"
+
 func executeOnly(ctx context.Context) (string, error) {
 	var prev, token string
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
 		const el = document.querySelector('[data-hcaptcha-widget-id]');
-		return el ? (el.getAttribute('data-hcaptcha-response') || '') : '';
+		return el ? (el.getAttribute('data-hcaptcha-response') || '') : '`+widgetMissingSentinel+`';
 	})()`, &prev)); err != nil {
 		return "", fmt.Errorf("chromedp read prev: %w", err)
+	}
+	if prev == widgetMissingSentinel {
+		// Sticky tab lost its widget (external navigation, bot wall, page
+		// change). Polling would burn the full 30s deadline per attempt; a hard
+		// failure here routes into the reload rung, which re-navigates now.
+		return "", fmt.Errorf("captcha widget missing (page navigated away or bot wall)")
 	}
 
 	if err := chromedp.Run(ctx, chromedp.Evaluate(execJS(), &token)); err != nil {

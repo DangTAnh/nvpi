@@ -12,7 +12,7 @@ import (
 func TestTranslateToChat_preservesResponsesCompatibleFields(t *testing.T) {
 	// Given: a Responses request containing fields that Chat Completions can express.
 	request := []byte(`{
-		"model":"z-ai/glm-5.2",
+		"model":"minimaxai/minimax-m3",
 		"input":"hello",
 		"temperature":0.25,
 		"top_p":0.8,
@@ -22,7 +22,7 @@ func TestTranslateToChat_preservesResponsesCompatibleFields(t *testing.T) {
 	}`)
 
 	// When: the request is translated to the canonical Chat format.
-	got, err := translateToChat(sdktranslator.FormatOpenAIResponse, "z-ai/glm-5.2", request, false)
+	got, err := translateToChat(sdktranslator.FormatOpenAIResponse, "minimaxai/minimax-m3", request, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestTranslateToChat_preservesResponsesCompatibleFields(t *testing.T) {
 func TestTranslateToChat_preservesClaudeTemperatureAndTopP(t *testing.T) {
 	// Given: Claude parameters whose translator currently treats as mutually exclusive.
 	request := []byte(`{
-		"model":"z-ai/glm-5.2",
+		"model":"minimaxai/minimax-m3",
 		"max_tokens":32,
 		"temperature":0.2,
 		"top_p":0.7,
@@ -65,7 +65,7 @@ func TestTranslateToChat_preservesClaudeTemperatureAndTopP(t *testing.T) {
 	}`)
 
 	// When: the request is translated to canonical Chat.
-	got, err := translateToChat(sdktranslator.FormatClaude, "z-ai/glm-5.2", request, false)
+	got, err := translateToChat(sdktranslator.FormatClaude, "minimaxai/minimax-m3", request, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,27 +89,27 @@ func TestTranslateToChat_ignoresUnsupportedPlatformFeatures(t *testing.T) {
 		{
 			name:    "responses store",
 			format:  sdktranslator.FormatOpenAIResponse,
-			request: `{"model":"z-ai/glm-5.2","input":"hello","store":true}`,
+			request: `{"model":"minimaxai/minimax-m3","input":"hello","store":true}`,
 		},
 		{
 			name:    "responses state",
 			format:  sdktranslator.FormatOpenAIResponse,
-			request: `{"model":"z-ai/glm-5.2","input":"hello","previous_response_id":"resp_1"}`,
+			request: `{"model":"minimaxai/minimax-m3","input":"hello","previous_response_id":"resp_1"}`,
 		},
 		{
 			name:    "responses hosted tool",
 			format:  sdktranslator.FormatOpenAIResponse,
-			request: `{"model":"z-ai/glm-5.2","input":"hello","tools":[{"type":"web_search_preview"}]}`,
+			request: `{"model":"minimaxai/minimax-m3","input":"hello","tools":[{"type":"web_search_preview"}]}`,
 		},
 		{
 			name:    "responses input file",
 			format:  sdktranslator.FormatOpenAIResponse,
-			request: `{"model":"z-ai/glm-5.2","input":[{"role":"user","content":[{"type":"input_file","file_id":"file_1"}]}]}`,
+			request: `{"model":"minimaxai/minimax-m3","input":[{"role":"user","content":[{"type":"input_file","file_id":"file_1"}]}]}`,
 		},
 		{
 			name:    "claude document",
 			format:  sdktranslator.FormatClaude,
-			request: `{"model":"z-ai/glm-5.2","max_tokens":32,"messages":[{"role":"user","content":[{"type":"document","source":{"type":"base64","data":"AA=="}}]}]}`,
+			request: `{"model":"minimaxai/minimax-m3","max_tokens":32,"messages":[{"role":"user","content":[{"type":"document","source":{"type":"base64","data":"AA=="}}]}]}`,
 		},
 	}
 
@@ -117,7 +117,7 @@ func TestTranslateToChat_ignoresUnsupportedPlatformFeatures(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			// Given: a source request that includes platform-only fields.
 			// When: it is translated to Chat Completions.
-			got, err := translateToChat(test.format, "z-ai/glm-5.2", []byte(test.request), false)
+			got, err := translateToChat(test.format, "minimaxai/minimax-m3", []byte(test.request), false)
 
 			// Then: translation succeeds; unsupported fields are dropped by translation.
 			if err != nil {

@@ -15,6 +15,10 @@ type BrowserConfig struct {
 	// Proxy is a Chrome --proxy-server URL, e.g. "socks5://127.0.0.1:7890".
 	// Empty falls back to CHROME_PROXY.
 	Proxy string
+	// Playground pins a specific playground URL (e.g. when an upstream model
+	// is retired but the new one is not yet picked by the registry). Empty
+	// triggers the auto-probe at first warm.
+	Playground string
 }
 
 func (c BrowserConfig) withDefaults() BrowserConfig {

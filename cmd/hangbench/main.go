@@ -188,7 +188,7 @@ func phasePool(ctx context.Context, workers, size, drainN int, takeWait time.Dur
 		}
 		fmt.Printf("  take#%d OK %s\n", r.i+1, r.d.Round(time.Millisecond))
 	}
-	fills, takes, errs, expired := pool.Stats()
+	fills, takes, errs, expired, _, _ := pool.Stats()
 	fmt.Printf("  summary wall=%s ok=%d fail=%d max_ok=%s ready=%d fills=%d takes=%d errors=%d expired=%d chrome_procs=%d\n",
 		wall.Round(time.Millisecond), ok, fail, maxOK.Round(time.Millisecond),
 		pool.Ready(), fills, takes, errs, expired, countChromeProcs())
@@ -229,7 +229,7 @@ func phaseIdleBurst(ctx context.Context, workers, size, burst int, idle, takeWai
 		return ctx.Err()
 	case <-time.After(idle):
 	}
-	fills, takes, errs, expired := pool.Stats()
+	fills, takes, errs, expired, _, _ := pool.Stats()
 	fmt.Printf("  after idle ready=%d fills=%d takes=%d errors=%d expired=%d chrome_procs=%d\n",
 		pool.Ready(), fills, takes, errs, expired, countChromeProcs())
 
@@ -269,7 +269,7 @@ func phaseIdleBurst(ctx context.Context, workers, size, burst int, idle, takeWai
 		}
 		fmt.Printf("  take#%d OK %s\n", r.i+1, r.d.Round(time.Millisecond))
 	}
-	fills, takes, errs, expired = pool.Stats()
+	fills, takes, errs, expired, _, _ = pool.Stats()
 	fmt.Printf("  summary wall=%s ok=%d fail=%d max_ok=%s ready=%d fills=%d takes=%d errors=%d expired=%d chrome_procs=%d\n",
 		wall.Round(time.Millisecond), ok, fail, maxOK.Round(time.Millisecond),
 		pool.Ready(), fills, takes, errs, expired, countChromeProcs())
