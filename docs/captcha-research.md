@@ -155,3 +155,34 @@ hardcode (3 cold rounds mỗi trang, Chrome launch + warm đầy đủ):
 
 Ý nghĩa: chọn đúng trang mint tiết kiệm ~15s mỗi lần launch/re-navigate;
 selector tự hội tụ về nhóm ~2.4s qua state, không cần dữ liệu cứng này.
+
+## Phụ lục: trang harness tối giản — PoC + đo RAM (2026-08-23)
+
+Kết quả PoC end-to-end (`cmd/pocharness`), minimax-m3:
+
+- Sitekey scrape **HTTP thuần, không Chrome** (48 chunk `_next`, tìm thấy ở
+  `{default:"<uuid>",otp:"<uuid>"}`): ~65s trên mạng chậm (song song 8).
+- Mint **2/2 token trong 2.1s** trên harness page; predict endpoint trả
+  **HTTP 200**, model sinh text thật → siteverify chấp nhận token harness.
+- Gateway end-to-end: `-auto -captcha-harness` → pool ready=6 ngay lần warm
+  đầu (batch 6), `POST /v1/chat/completions` → 200 với nội dung model thật.
+
+RAM cùng điều kiện (1 chrome-headless-shell, pool ready=6 token):
+
+| Chế độ | Tổng WS | Renderer |
+|---|---|---|
+| Trang Next.js đầy đủ (cũ) | 995 MB | 633 MB |
+| Trang harness tối giản | 549 MB | 213 MB |
+
+→ **-45% RAM tổng / -66% renderer** cho mỗi chrome mint. Renderer còn tăng
+theo số widget render (mỗi widget = 1 iframe hcaptcha) — batch lớn hơn RAM cao
+hơn: cân giữa `-pool-batch` và RAM.
+
+Cơ chế (harness.go): navigate `robots.txt` của build.nvidia.com (3.6KB
+text/plain, không script) rồi `document.write` đè bằng ~15 dòng HTML chỉ chứa
+hcaptcha api.js — origin giữ nguyên nên siteverify vẫn thấy build.nvidia.com.
+Phiên bản interception CDP (Fetch.requestPaused + FulfillRequest) đã thử trước
+đó nhưng event không fire trên chrome-headless-shell → bỏ.
+
+Sitekey cố định trong process lifetime (scrape lúc start); NVIDIA đổi key rất
+hiếm, restart là đủ. `-captcha-harness=false` quay lại đường cũ đầy đủ.

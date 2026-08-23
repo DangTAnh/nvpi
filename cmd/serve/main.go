@@ -12,7 +12,7 @@
 // Usage:
 //
 //	go run ./cmd/serve -auto
-//	go run ./cmd/serve -auto -pool-size=6 -pool-workers=3 -pool-batch=3 -coalesce-ms=0 -max-inflight=8
+//	go run ./cmd/serve -auto -pool-size=6 -pool-workers=3 -pool-batch=6 -coalesce-ms=0 -max-inflight=8
 //	go run ./cmd/serve -captcha "P1_..."
 package main
 
@@ -56,10 +56,14 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "listen address (default loopback: unauthenticated gateway; pass \"-addr :8080\" or use Docker/compose, which set it explicitly, to expose)")
 	captchaFlag := flag.String("captcha", "", "one-shot hCaptcha token (consumed on first use)")
 	auto := flag.Bool("auto", false, "prewarm captcha tokens via shared Chrome + pool")
-	poolSize := flag.Int("pool-size", 3, "ready captcha tokens to keep buffered (-auto)")
+	// Defaults sized so ONE Chrome serves a Claude Code burst: a batch of 6
+	// one-shot tokens covers max-inflight 8 within the token TTL, instead of
+	// spawning more Chromes (each ~100-350MB).
+	poolSize := flag.Int("pool-size", 6, "ready captcha tokens to keep buffered (-auto)")
 	poolWorkers := flag.Int("pool-workers", 3, "concurrent captcha mint workers (-auto); set >= -chromes-max so bursts can drive every Chrome; blocked-on-browser workers cost nothing")
-	poolBatch := flag.Int("pool-batch", 3, "captcha tokens minted per Chrome visit (extra invisible hCaptcha widgets rendered on the sticky tab); 1 = one token per visit")
-	chromesMax := flag.Int("chromes-max", 3, "elastic Chrome ceiling (-auto): group starts with 1 Chrome and spawns more under borrow pressure up to this; 1 = fixed single Chrome")
+	poolBatch := flag.Int("pool-batch", 6, "captcha tokens minted per Chrome visit (extra invisible hCaptcha widgets rendered on the sticky tab); 1 = one token per visit; capped by -pool-size free slots")
+	chromesMax := flag.Int("chromes-max", 2, "elastic Chrome ceiling (-auto): group starts with 1 Chrome and spawns more under borrow pressure up to this; 1 = fixed single Chrome")
+	harness := flag.Bool("captcha-harness", true, "mint on a minimal same-origin harness page instead of the full Next.js playground (~50MB vs ~150-350MB per chrome, ~2s warm); auto-falls back to the full page (with playground selection) when the sitekey scrape fails")
 	chromeIdleRecycle := flag.Duration("chrome-idle-recycle", 10*time.Minute, "close Chromes idle longer than this (-auto elastic), keeping at least 1; 10min matches sticky-tab staleness so recycling loses nothing")
 	maxInflight := flag.Int("max-inflight", 8, "max concurrent upstream streams (0=unlimited); 8 absorbs Claude Code parallel tool-call bursts — overflow queues at TakeLease instead of failing hard")
 	inflightWait := flag.Duration("inflight-wait", 500*time.Millisecond, "how long to wait for an in-flight slot before returning 503 (0=reject immediately)")
@@ -141,7 +145,25 @@ func main() {
 	if *auto {
 		pgURL := strings.TrimSpace(*captchaPlayground)
 		var seed *captcha.Browser
-		if pgURL == "" {
+		var sk string
+		useHarness := *harness
+		if useHarness {
+			if pgURL == "" {
+				// Harness minting is model-agnostic — the URL is only the
+				// plain-HTTP scrape source for the sitekey.
+				pgURL = captcha.PlaygroundURL(models.DefaultModel)
+			}
+			skCtx, skCancel := context.WithTimeout(ctx, 2*time.Minute)
+			var skErr error
+			sk, skErr = captcha.FetchSitekeyHTTP(skCtx, nil, pgURL)
+			skCancel()
+			if skErr != nil {
+				log.Printf("captcha harness: sitekey scrape failed (%v); falling back to full-page mint", skErr)
+				useHarness = false
+				pgURL = ""
+			}
+		}
+		if !useHarness && pgURL == "" {
 			pgURL, seed = selectPlayground(ctx, proxyURL, *selectBudget)
 		}
 		initial := 1
@@ -152,8 +174,10 @@ func main() {
 		}
 		var err error
 		browser, err = captcha.NewBrowserGroup(ctx, initial, captcha.BrowserConfig{
-			Proxy:      proxyURL,
-			Playground: pgURL,
+			Proxy:          proxyURL,
+			Playground:     pgURL,
+			Harness:        useHarness,
+			HarnessSitekey: sk,
 		})
 		if err != nil {
 			log.Fatalf("captcha browser: %v", err)

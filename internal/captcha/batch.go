@@ -106,13 +106,22 @@ func (b *Browser) ExtractBatch(ctx context.Context, n int) ([]string, error) {
 	return toks, nil
 }
 
-// navigateAndExecuteBatch re-warms the playground and mints a batch. Extra
-// widgets do not survive navigation, so the cache resets and re-provisions.
+// navigateAndExecuteBatch re-warms the tab and mints a batch. Extra widgets do
+// not survive navigation, so the cache resets and re-provisions; b.mu is held
+// by the ExtractBatch caller. In harness mode the sitekey is process-scoped
+// (from config) and must survive re-warms.
 func (b *Browser) navigateAndExecuteBatch(ctx context.Context, n int) ([]string, error) {
-	if err := warmPlayground(ctx, b.pgURL); err != nil {
-		return nil, fmt.Errorf("chromedp navigate: %w", err)
+	if b.harness {
+		if err := warmHarness(ctx, b.pgURL); err != nil {
+			return nil, fmt.Errorf("chromedp navigate: %w", err)
+		}
+		b.extraIDs = nil
+	} else {
+		if err := warmPlayground(ctx, b.pgURL); err != nil {
+			return nil, fmt.Errorf("chromedp navigate: %w", err)
+		}
+		b.sitekey, b.extraIDs = "", nil
 	}
-	b.sitekey, b.extraIDs = "", nil
 	return b.executeBatch(ctx, n)
 }
 
@@ -121,6 +130,9 @@ func (b *Browser) navigateAndExecuteBatch(ctx context.Context, n int) ([]string,
 // unavailable — sequential executes on the primary widget (legacy behavior).
 func (b *Browser) executeBatch(ctx context.Context, n int) ([]string, error) {
 	ids := b.ensureWidgets(ctx, n)
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("captcha widget missing (no renderable widgets)")
+	}
 	if len(ids) < 2 {
 		toks := make([]string, 0, n)
 		for i := 0; i < n; i++ {
@@ -139,13 +151,43 @@ func (b *Browser) executeBatch(ctx context.Context, n int) ([]string, error) {
 }
 
 // ensureWidgets returns the widget ids to execute for a batch of n: the page's
-// primary widget plus cached rendered widgets, topping up renders to reach n.
-// Best-effort: any failure returns whatever exists (possibly just the primary).
+// primary widget plus cached rendered widgets, topping up renders to reach n
+// (harness mode: no primary exists, every widget is self-rendered and the
+// sitekey comes from config). Best-effort: any failure returns whatever exists.
 func (b *Browser) ensureWidgets(ctx context.Context, n int) []string {
 	var domIDs []string
-	if err := chromedp.Run(ctx, chromedp.Evaluate(listWidgetIDsJS, &domIDs)); err != nil || len(domIDs) == 0 {
+	if err := chromedp.Run(ctx, chromedp.Evaluate(listWidgetIDsJS, &domIDs)); err != nil || len(domIDs) == 0 && !b.harness {
 		return nil
 	}
+
+	// Harness mode: every widget is ours — no primary to reserve a slot for.
+	if b.harness {
+		if b.sitekey == "" {
+			return nil
+		}
+		if need := n - len(b.extraIDs); need > 0 {
+			var newIDs []string
+			render := jsInvoke(renderWidgetsJS, fmt.Sprintf("%q", b.sitekey), strconv.Itoa(need))
+			if err := chromedp.Run(ctx, chromedp.Evaluate(render, &newIDs)); err != nil || len(newIDs) == 0 {
+				log.Printf("captcha batch: hcaptcha.render failed (%v)", err)
+				return nil
+			}
+			fresh := make([]string, 0, len(newIDs))
+			for _, id := range newIDs {
+				if id != "" && !strings.HasPrefix(id, "ERR:") {
+					fresh = append(fresh, id)
+				}
+			}
+			fresh = waitWidgetsMounted(ctx, fresh, 10*time.Second)
+			b.extraIDs = append(b.extraIDs, fresh...)
+		}
+		if len(b.extraIDs) == 0 {
+			log.Printf("captcha batch: harness widgets never mounted")
+			return nil
+		}
+		return b.extraIDs
+	}
+
 	primary := domIDs[0]
 
 	// Keep only cached extras still in the DOM (a re-navigate wipes them).

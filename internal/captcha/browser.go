@@ -35,7 +35,8 @@ type Browser struct {
 	closed      bool
 	warmed      bool
 	lastOK      time.Time
-	pgURL       string // resolved playground URL
+	pgURL       string // resolved playground URL (harness origin source when Harness)
+	harness     bool   // mint on the minimal same-origin harness page (see harness.go)
 	navCount    atomic.Uint64
 	stickyCount atomic.Uint64
 
@@ -133,13 +134,29 @@ func NewBrowser(parent context.Context, cfg BrowserConfig) (*Browser, error) {
 		cancel:  allocCancel,
 		bCancel: bCancel,
 		pgURL:   pgURL,
+		harness: cfg.Harness && cfg.HarnessSitekey != "",
+	}
+	if cfg.Harness && cfg.HarnessSitekey == "" {
+		b.Close()
+		return nil, fmt.Errorf("captcha browser: Harness requires HarnessSitekey (FetchSitekeyHTTP)")
+	}
+	// Seed batch-mint state for harness mode: there is no primary widget to
+	// scrape the sitekey from, so the HTTP-scraped key is the only source.
+	if b.harness {
+		b.sitekey = cfg.HarnessSitekey
 	}
 
 	// Warm playground once so Extract can skip Navigate in the steady state.
 	if !cfg.NoWarm {
 		warmCtx, warmCancel := context.WithTimeout(browser, 90*time.Second)
 		defer warmCancel()
-		if err := warmPlayground(warmCtx, pgURL); err != nil {
+		var err error
+		if cfg.Harness {
+			err = warmHarness(warmCtx, pgURL)
+		} else {
+			err = warmPlayground(warmCtx, pgURL)
+		}
+		if err != nil {
 			b.Close()
 			return nil, fmt.Errorf("captcha browser warm: %w", err)
 		}
@@ -177,7 +194,20 @@ func (b *Browser) ProbeNav(ctx context.Context, url string) (time.Duration, erro
 
 // Extract returns a one-shot captcha token from the sticky playground tab.
 // Concurrent callers are serialized (one tab); steady-state cost is execute({async:true}).
+// In harness mode every widget is self-rendered, so a single mint is just a
+// one-token batch — delegate to keep one code path for widget management.
 func (b *Browser) Extract(ctx context.Context) (string, error) {
+	if b.isHarness() {
+		toks, err := b.ExtractBatch(ctx, 1)
+		if err != nil {
+			return "", err
+		}
+		if len(toks) == 0 {
+			return "", fmt.Errorf("empty captcha token")
+		}
+		return toks[0], nil
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.closed {
@@ -221,6 +251,13 @@ func (b *Browser) Extract(ctx context.Context) (string, error) {
 	b.warmed = true
 	b.lastOK = time.Now()
 	return token, nil
+}
+
+// isHarness reports harness mode without deadlocking Extract's later Lock.
+func (b *Browser) isHarness() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.harness && !b.closed
 }
 
 func (b *Browser) runExtract(ctx context.Context, limit time.Duration, fn func(context.Context) (string, error)) (string, error) {

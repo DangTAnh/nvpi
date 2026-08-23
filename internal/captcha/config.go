@@ -23,6 +23,15 @@ type BrowserConfig struct {
 	// navigates on first use (or ProbeNav). Used by the playground selector's
 	// probe Chrome, which navigates itself once per candidate.
 	NoWarm bool
+	// Harness mints on a minimal same-origin harness page (see harness.go)
+	// instead of the full Next.js playground: same hCaptcha tokens accepted by
+	// the predict API, at a fraction of the RAM per Chrome (~50MB vs
+	// ~150–350MB) with ~2s warms instead of 6–10s. Requires HarnessSitekey.
+	Harness bool
+	// HarnessSitekey is the hCaptcha sitekey for build.nvidia.com, scraped over
+	// plain HTTP by FetchSitekeyHTTP once per process at startup. Fixed for the
+	// process lifetime — NVIDIA rotates it rarely, and a restart re-scrapes.
+	HarnessSitekey string
 }
 
 func (c BrowserConfig) withDefaults() BrowserConfig {
@@ -54,8 +63,13 @@ func ChromeAllocatorOptions() []chromedp.ExecAllocatorOption {
 		chromedp.Flag("disable-domain-reliability", true),
 		chromedp.Flag("no-pings", true),
 		chromedp.Flag("disable-features", chromeDisableFeatures),
+		// Disk cache off: the tab re-navigates the same page, caching megabytes
+		// of Next.js chunks it never re-reads within a token's 120s TTL.
+		chromedp.Flag("disk-cache-size", "1"),
 		chromedp.UserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
-		chromedp.WindowSize(1280, 900),
+		// 720p is enough for the invisible widget; smaller viewport = smaller
+		// layout/compositing working set.
+		chromedp.WindowSize(1280, 720),
 	)
 }
 

@@ -71,10 +71,10 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 |---|---|---|
 | `-addr` | `127.0.0.1:8080` | Bind loopback vì gateway **không auth**; Docker/compose truyền `:8080` tường minh |
 | `-auto` | off | Bật Chrome pool prewarm (không bật thì mỗi request phải tự gửi `nv-captcha-token`) |
-| `-pool-size` | `3` | Số token ready giữ trong buffer |
+| `-pool-size` | `6` | Số token ready giữ trong buffer |
 | `-pool-workers` | `3` | Worker mint song song (mỗi worker mượn 1 Chrome) |
-| `-pool-batch` | `3` | Token mint mỗi lần mượn Chrome (nhiều widget ẩn trên cùng sticky tab) |
-| `-chromes-max` | `3` | Trần Chrome elastic; `1` = cố định |
+| `-pool-batch` | `6` | Token mint mỗi lần mượn Chrome (nhiều widget ẩn trên cùng sticky tab) |
+| `-chromes-max` | `2` | Trần Chrome elastic; `1` = cố định. Mặc định thấp để 1 batch phủ burst — ít Chrome, ít RAM |
 | `-chrome-idle-recycle` | `10m` | Đóng Chrome idle quá hạn (giữ floor 1); đối xứng sticky-tab staleness |
 | `-max-inflight` | `8` | Trần stream đồng thời — đủ cho burst parallel tool-call của Claude Code |
 | `-inflight-wait` | `500ms` | Chờ slot inflight trước khi 503 |
@@ -82,7 +82,8 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 | `-warm-timeout` | `3m` | Chờ ≥1 token trước khi serve |
 | `-pool-ttl` | `90s` | Tuổi tối đa token buffer (tự trôi 60–115s theo tỉ lệ stale) |
 | `-captcha-wait` | `30s` | Chờ token khi pool cạn rồi mới 503 |
-| `-captcha-playground` | rỗng = auto | Rỗng: bench cửa sổ trượt 5 trang sống mỗi lần start (`-captcha-select-budget` 4m), champion lưu `~/.nvpi/playground-state.json`; NVIDIA retire model → tự đổi trang mint, không hardcode. Gắn URL để ghim cứng |
+| `-captcha-playground` | rỗng = auto | Rỗng: bench cửa sổ trượt 5 trang sống mỗi lần start (`-captcha-select-budget` 4m), champion lưu `~/.nvpi/playground-state.json`; NVIDIA retire model → tự đổi trang mint, không hardcode. Gắn URL để ghim cứng. Bỏ qua khi `-captcha-harness` bật (mặc định) — mint không phụ thuộc trang model sống |
+| `-captcha-harness` | `true` | Mint trên **trang harness tối giản** thay vì trang Next.js đầy đủ: cùng origin build.nvidia.com, sitekey scrape bằng HTTP thuần lúc start — RAM/chrome ~50MB thay vì ~150–350MB, warm ~2s thay vì 6–10s, mint batch 6 token ~2s. Scrape fail → tự fallback về đường cũ (kèm playground selection) |
 | `-default-model` | rỗng | Rewrite model lạ (VD `claude-*`) về model đăng ký |
 | `-refresh-registry` | `true` | Refresh catalog NVIDIA lúc start (merge, không thay thế — probe fail tạm thời không làm mất model) |
 | `-chrome-proxy` | `CHROME_PROXY` | Proxy cho cả Chrome lẫn upstream (vd `socks5://host:port`) |
