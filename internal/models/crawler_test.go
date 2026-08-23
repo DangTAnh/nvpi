@@ -27,54 +27,44 @@ func TestProbeRegexes(t *testing.T) {
 			}
 		}
 	}
-
-	if m := outputModalitiesRE.FindSubmatch([]byte(body)); m == nil {
-		t.Fatal("outputModalitiesRE did not match")
-	} else if got := string(m[1]); got != `\"Text\"` {
-		t.Fatalf("outputModalitiesRE captured %q, want escaped \"Text\"", got)
-	}
 }
 
-// TestParseOutputModalities pins the keep/drop rule: drop only when the field
-// exists AND lacks "Text"; absence of the field (or a malformed page) keeps.
-func TestParseOutputModalities(t *testing.T) {
+// TestPageIsText pins the keep/drop rule against real page shapes observed
+// live on 2026-08-23: chat pages carry a full three-field modelCapability;
+// embedding pages render only the functionCalling stub; ASR/retrieval pages
+// omit it entirely. (The old outputModalities signal was unreliable — empty
+// arrays on non-chat pages, missing on some chat pages.)
+func TestPageIsText(t *testing.T) {
 	tests := []struct {
-		name    string
-		body    string
-		found   bool
-		hasText bool
+		name string
+		body string
+		want bool
 	}{
 		{
-			name:    "text output keeps",
-			body:    `\"inputModalities\":[\"Text\",\"Image\"],\"outputModalities\":[\"Text\"]`,
-			found:   true,
-			hasText: true,
+			name: "chat page with full modelCapability keeps",
+			body: `\"modelCapability\":{\"functionCalling\":true,\"structuredOutput\":true,\"reasoning\":false}}`,
+			want: true,
 		},
 		{
-			name:    "image-only output drops",
-			body:    `\"outputModalities\":[\"Image\"]`,
-			found:   true,
-			hasText: false,
+			name: "all-false flags still a chat template",
+			body: `\"modelCapability\":{\"functionCalling\":false,\"structuredOutput\":false,\"reasoning\":false}}`,
+			want: true,
 		},
 		{
-			name:    "empty array drops",
-			body:    `\"outputModalities\":[]`,
-			found:   true,
-			hasText: false,
+			name: "embedding one-field stub drops (baai/bge-m3)",
+			body: `\"deploy\":[{\"label\":\"Linux with Docker\",\"filename\":\"linux.md\",\"contents\":\"$4f\"}],\"modelCapability\":{\"functionCalling\":false}},\"artifactName\":\"bge-m3\"`,
+			want: false,
 		},
 		{
-			name:    "field absent keeps (no signal)",
-			body:    `\"specifications\":{\"contextLength\":4096}`,
-			found:   false,
-			hasText: false,
+			name: "no modelCapability at all drops (nvidia/llama-3_2-nv-embedqa)",
+			body: `\"specifications\":{\"contextLength\":4096},\"artifactName\":\"x\"`,
+			want: false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotFound, gotHasText := parseOutputModalities([]byte(tt.body))
-			if gotFound != tt.found || gotHasText != tt.hasText {
-				t.Fatalf("parseOutputModalities(%q) = (%v,%v), want (%v,%v)",
-					tt.body, gotFound, gotHasText, tt.found, tt.hasText)
+			if got := pageIsText([]byte(tt.body)); got != tt.want {
+				t.Fatalf("pageIsText(%q) = %v, want %v", tt.body, got, tt.want)
 			}
 		})
 	}

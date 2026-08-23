@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
@@ -32,8 +31,13 @@ import (
 //		  {\"functionCalling\":true,\"structuredOutput\":true,\"reasoning\":true}
 //		  The visible "Capabilities" sidebar is rendered client-side from the
 //		  same data, so we cannot parse the rendered DOM without a JS engine.
-//		  The JSON literal is good enough for the 3 fields ModelCapability
-//		  cares about today.
+//
+// Text filter (2026-08-23): a model enters the refreshed registry only when
+// its page carries a FULL modelCapability object — the chat-playground signal
+// (pageIsText). outputModalities proved unreliable and was removed as the
+// signal: embedding pages render an empty array or omit it, while ASR/retrieval
+// pages omit modelCapability entirely; bge-m3 additionally shows that an
+// object with only functionCalling is an embedding stub, not a chat page.
 //
 // ponytail: package-private constants + 3 fetch helpers + bounded concurrent
 // probe. If the catalog call fails we keep the hardcoded registry — refresh
@@ -206,19 +210,17 @@ func probeQueues(ctx context.Context, hc *http.Client, ids []string, concurrency
 			// Capability + context length probe are best-effort and run after
 			// the queue check so a retired model is dropped before we waste a
 			// page fetch.
-			caps, ctxLen, nonText := probeCapabilitiesAndContext(ctx, hc, id)
+			caps, ctxLen, isText := probeCapabilitiesAndContext(ctx, hc, id)
 
 			mu.Lock()
-			if nonText {
-				// Page clearly declares non-Text outputs (e.g. image/video
-				// generation) — not chat-servable, keep it out of the registry.
+			if !isText {
+				// Page shows no full modelCapability object — not a chat/text
+				// playground (embedding stub, ASR, retrieval…). Keep it out.
 				res.Skipped++
 				mu.Unlock()
 				return
 			}
-			if caps != nil {
-				res.WithCaps++
-			}
+			res.WithCaps++
 			out[id] = ModelInfo{
 				Slug:          slugOf(id),
 				Namespace:     Namespace,
@@ -300,32 +302,29 @@ var capabilityJSONRE = regexp.MustCompile(`\\"functionCalling\\":(true|false),\\
 // minimax-m3, 32768 for gemma-3n-e4b-it). 0 when absent.
 var contextLengthRE = regexp.MustCompile(`\\"contextLength\\":([0-9]+)`)
 
-// outputModalitiesRE captures `\\"outputModalities\\":[...]` from the same
-// specifications JSON literal (e.g. [\"Text\"] or [\"Image\",\"Video\"]). The
-// gateway only serves chat/text completions, so a model whose declared outputs
-// exclude Text is filtered out of refreshed registries.
-var outputModalitiesRE = regexp.MustCompile(`\\"outputModalities\\":\[([^]]*)\]`)
+// outputModalities proved unreliable in practice (arrays missing or empty on
+// pages that are clearly not chat, e.g. baai/bge-m3 renders an empty []). The
+// keep/drop signal is now the modelCapability object itself: see pageIsText.
 
-// parseOutputModalities reports whether the page declares an outputModalities
-// array and whether that array contains "Text". found=false (field absent,
-// page malformed) carries no signal — the caller keeps the model; a model is
-// dropped only when the field exists and clearly lacks Text.
-func parseOutputModalities(body []byte) (found, hasText bool) {
-	m := outputModalitiesRE.FindSubmatch(body)
-	if m == nil {
-		return false, false
-	}
-	return true, strings.Contains(string(m[1]), "Text")
+// pageIsText reports whether the page carries a FULL modelCapability object
+// (`{\"functionCalling\":…,\"structuredOutput\":…,\"reasoning\":…}`). Chat/text
+// playgrounds always inline all three flags; embedding/ASR/retrieval pages omit
+// the object entirely or render only the one-field stub
+// `{\"functionCalling\":false}` (verified live 2026-08-23: minimax-m3 and
+// nemotron-nano-12b-v2-vl carry all three; bge-m3 renders the stub;
+// llama-3_2-nv-embedqa and riva-asr have none).
+func pageIsText(body []byte) bool {
+	return capabilityJSONRE.FindSubmatch(body) != nil
 }
 
 // probeCapabilitiesAndContext fetches the playground HTML once and extracts
-// both the capability flags and the contextLength. Returns nonText=true when
-// the page declares an outputModalities array without "Text" — such models are
-// not chat/text and must not enter the discovered map. Returns (nil, 0) when
-// the page is unreachable / malformed — neither field is worth guessing. A page
-// that carries only one of the two is still useful; we return whatever we
-// found.
-func probeCapabilitiesAndContext(ctx context.Context, hc *http.Client, id string) (caps *ModelCapability, ctxLen int, nonText bool) {
+// both the capability flags and the contextLength. isText=false means the page
+// shows no full modelCapability object (see pageIsText) — such models must not
+// enter the discovered map. An unreachable/malformed page also yields
+// isText=false ("no proof of text"): hardcoded entries survive via the
+// mergeRegistry carry-over; brand-new ones just wait for the next refresh.
+// ctxLen stays 0 when the page lacks the specifications literal.
+func probeCapabilitiesAndContext(ctx context.Context, hc *http.Client, id string) (caps *ModelCapability, ctxLen int, isText bool) {
 	pub, slug, ok := splitPublisherSlug(id)
 	if !ok {
 		return nil, 0, false
@@ -347,18 +346,14 @@ func probeCapabilitiesAndContext(ctx context.Context, hc *http.Client, id string
 		return nil, 0, false
 	}
 
-	// Non-text outputs are disqualifying even when everything else parses.
-	if found, hasText := parseOutputModalities(body); found && !hasText {
-		return nil, 0, true
+	m := capabilityJSONRE.FindSubmatch(body)
+	if m == nil {
+		return nil, 0, false
 	}
-
-	var capsOut *ModelCapability
-	if m := capabilityJSONRE.FindSubmatch(body); m != nil {
-		capsOut = &ModelCapability{
-			ToolCalling:      string(m[1]) == "true",
-			StructuredOutput: string(m[2]) == "true",
-			Reasoning:        string(m[3]) == "true",
-		}
+	capsOut := &ModelCapability{
+		ToolCalling:      string(m[1]) == "true",
+		StructuredOutput: string(m[2]) == "true",
+		Reasoning:        string(m[3]) == "true",
 	}
 
 	ctxLen = 0
@@ -367,5 +362,5 @@ func probeCapabilitiesAndContext(ctx context.Context, hc *http.Client, id string
 		// A bad regex match (impossible: `[0-9]+`) would still surface as 0.
 		ctxLen, _ = strconv.Atoi(string(m[1]))
 	}
-	return capsOut, ctxLen, false
+	return capsOut, ctxLen, true
 }
