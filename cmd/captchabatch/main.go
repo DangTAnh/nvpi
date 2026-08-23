@@ -10,14 +10,18 @@ import (
 	"io"
 	"log"
 	"net/http"
+	url2 "net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 
 	"glm52-nvidia/internal/captcha"
+	"glm52-nvidia/internal/models"
 )
 
 func main() {
@@ -28,8 +32,18 @@ func main() {
 	bench := flag.Int("bench-pool", 0, "run a Pool+BrowserGroup throughput bench with this batch size (skips the render probe)")
 	chromesMax := flag.Int("chromes-max", 0, "with -bench-pool: start at 1 Chrome and scale elastically up to this under pressure (0 = fixed 2)")
 	idleRecycle := flag.Duration("idle-recycle", 0, "with -chromes-max: close Chromes idle longer than this")
+	benchPages := flag.Int("bench-pages", 0, "time cold NewBrowser+Extract for every models.Models entry, this many rounds each (sequential, median reported)")
+	netlog := flag.String("netlog", "", "navigate this URL once and dump third-party request hosts seen during the nav")
 	flag.Parse()
 
+	if *benchPages > 0 {
+		benchPagesMode(*benchPages)
+		return
+	}
+	if *netlog != "" {
+		netlogMode(*netlog)
+		return
+	}
 	if *bench > 0 {
 		benchPool(*bench, *chromesMax, *idleRecycle)
 		return
@@ -65,8 +79,6 @@ func main() {
 
 	var sitekey string
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
-		// The checkbox iframe fragment lacks sitekey; the challenge iframe's
-		// fragment carries it. Scan every iframe's URL (fragment first, then query).
 		const grab = (u) => {
 			try {
 				const s = String(u);
@@ -84,17 +96,6 @@ func main() {
 		}
 		return '';
 	})()`, &sitekey)); err != nil || sitekey == "" {
-		var diag string
-		_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => {
-			const out = [];
-			document.querySelectorAll('iframe').forEach(f => out.push('iframe: ' + String(f.src)));
-			try {
-				const nd = JSON.stringify(window.__NEXT_DATA__).match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g);
-				out.push('next_data uuids: ' + JSON.stringify(nd && nd.filter((v,i,a) => a.indexOf(v) === i)));
-			} catch (e) { out.push('no next data'); }
-			return out.join('\n');
-		})()`, &diag))
-		fmt.Println(diag)
 		log.Fatalf("sitekey not found")
 	}
 	fmt.Printf("sitekey: %s... (%d chars)\n", sitekey[:min(8, len(sitekey))], len(sitekey))
@@ -105,7 +106,6 @@ func main() {
 	}
 	fmt.Printf("primary widgets: %v\n", primaryIDs)
 
-	// Render n-1 extra invisible widgets.
 	renderJS := fmt.Sprintf(`((sitekey, count) => {
 		const out = [];
 		for (let i = 0; i < count; i++) {
@@ -140,21 +140,13 @@ func main() {
 		toks := batchExecute(ctx, allIDs)
 		fmt.Printf("round %d: %d/%d tokens in %s lens=%v\n",
 			round+1, len(toks), len(allIDs), time.Since(batchStart).Round(time.Millisecond), tokenLens(toks))
-
 		if *verify && len(toks) > 0 {
 			verifyToken(ctx, toks[0])
 		}
-
 		singleStart := time.Now()
 		stok := singleExecute(ctx, primaryIDs[0])
 		fmt.Printf("round %d single: ok=%t len=%d in %s\n",
 			round+1, stok != "", len(stok), time.Since(singleStart).Round(time.Millisecond))
-	}
-
-	select {
-	case <-ctx.Done():
-		log.Printf("ctx done: %v", ctx.Err())
-	default:
 	}
 	fmt.Println("done")
 }
@@ -175,6 +167,7 @@ func batchExecute(ctx context.Context, ids []string) []string {
 
 	deadline := time.Now().Add(15 * time.Second)
 	got := map[string]bool{}
+	toksOut := make([]string, 0, len(ids))
 	for time.Now().Before(deadline) && len(got) < len(ids) {
 		read := fmt.Sprintf(`((ids) => ids.map(id => {
 			let t = '';
@@ -187,40 +180,49 @@ func batchExecute(ctx context.Context, ids []string) []string {
 		}))(%s)`, jsStringList(ids))
 		var toks []string
 		if err := chromedp.Run(ctx, chromedp.Evaluate(read, &toks)); err != nil {
-			fmt.Printf("  read err: %v\n", err)
-			return nil
+			fmt.Printf("  poll failed: %v\n", err)
+			return toksOut
 		}
 		for _, t := range toks {
-			if len(t) >= 100 { // real hCaptcha tokens ~1.9KB; short values are widget stubs
+			if len(t) >= minTokenLen && !got[t] {
 				got[t] = true
+				toksOut = append(toksOut, t)
 			}
 		}
-		if err := chromedp.Sleep(50 * time.Millisecond).Do(ctx); err != nil {
-			break
-		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	out := make([]string, 0, len(got))
-	for t := range got {
-		out = append(out, t)
-	}
-	return out
+	return toksOut
 }
 
-// singleExecute mirrors the production sticky path on one widget id.
 func singleExecute(ctx context.Context, id string) string {
-	prev := ""
-	readAttr := fmt.Sprintf(`(() => { const el = document.querySelector('[data-hcaptcha-widget-id="%s"]'); return el ? (el.getAttribute('data-hcaptcha-response')||'') : ''; })()`, id)
-	_ = chromedp.Run(ctx, chromedp.Evaluate(readAttr, &prev))
-	fire := fmt.Sprintf(`(() => { try { hcaptcha.execute("%s", { async: true }); } catch(e){} return 1; })()`, id)
-	_ = chromedp.Run(ctx, chromedp.Evaluate(fire, nil))
-	deadline := time.Now().Add(10 * time.Second)
+	fire := fmt.Sprintf(`((id) => {
+		if (typeof hcaptcha === 'undefined') return '';
+		try { hcaptcha.execute(String(id), { async: true }); } catch (e) {}
+		const el = document.querySelector('[data-hcaptcha-widget-id="'+id+'"]');
+		return el ? (el.getAttribute('data-hcaptcha-response') || '') : '';
+	})("%s")`, id)
+	var prev string
+	if err := chromedp.Run(ctx, chromedp.Evaluate(fire, &prev)); err != nil {
+		return ""
+	}
+	if len(prev) >= minTokenLen {
+		return prev
+	}
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		var tok string
-		_ = chromedp.Run(ctx, chromedp.Evaluate(readAttr, &tok))
-		if tok != "" && tok != prev {
+		read := fmt.Sprintf(`(() => {
+			const el = document.querySelector('[data-hcaptcha-widget-id]="%s"'.replace(/"/g,'"'));
+			const el2 = document.querySelector('[data-hcaptcha-widget-id="%s"]');
+			return el2 ? (el2.getAttribute('data-hcaptcha-response') || '') : '';
+		})()`, id, id)
+		if err := chromedp.Run(ctx, chromedp.Evaluate(read, &tok)); err != nil {
+			return ""
+		}
+		if len(tok) >= minTokenLen && tok != prev {
 			return tok
 		}
-		_ = chromedp.Sleep(50 * time.Millisecond).Do(ctx)
+		time.Sleep(50 * time.Millisecond)
 	}
 	return ""
 }
@@ -236,7 +238,9 @@ func waitHCaptchaReady() chromedp.Action {
 			if ready {
 				return nil
 			}
-			_ = chromedp.Sleep(100 * time.Millisecond).Do(ctx)
+			if err := chromedp.Sleep(100 * time.Millisecond).Do(ctx); err != nil {
+				return err
+			}
 		}
 		return fmt.Errorf("hcaptcha global not ready")
 	})
@@ -250,17 +254,17 @@ func jsStringList(ss []string) string {
 	return "[" + strings.Join(q, ",") + "]"
 }
 
-// verifyToken burns one batched token against the real predict endpoint to
-// prove batched tokens are accepted upstream like single-path tokens.
+// minTokenLen separates real hCaptcha tokens (~1.9KB) from short stub values.
+const minTokenLen = 100
+
+// verifyToken burns one token against the real predict endpoint to prove it is
+// accepted upstream like production tokens.
 func verifyToken(ctx context.Context, token string) {
-	const (
-		endpoint   = "https://api.ngc.nvidia.com/v2/predict/models/qc69jvmznzxy/minimax-m3"
-		functionID = "87ea0ddc-cff1-4bca-bf8b-3bd98a35ddd0"
-	)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(
-		`{"model":"minimaxai/minimax-m3","messages":[{"role":"user","content":"hi"}],"max_tokens":8,"stream":false}`))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://api.ngc.nvidia.com/v2/predict/models/qc69jvmznzxy/minimax-m3",
+		strings.NewReader(`{"model":"minimaxai/minimax-m3","messages":[{"role":"user","content":"hi"}],"max_tokens":8,"stream":false}`))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("nv-function-id", functionID)
+	req.Header.Set("nv-function-id", "87ea0ddc-cff1-4bca-bf8b-3bd98a35ddd0")
 	req.Header.Set("nv-captcha-token", token)
 	req.Header.Set("Origin", "https://build.nvidia.com")
 	req.Header.Set("Referer", "https://build.nvidia.com/")
@@ -275,10 +279,10 @@ func verifyToken(ctx context.Context, token string) {
 }
 
 func truncateStr(s string, n int) string {
-	if len(s) > n {
-		return s[:n] + "...(truncated)"
+	if len(s) <= n {
+		return s
 	}
-	return s
+	return s[:n] + "...(truncated)"
 }
 
 func tokenLens(toks []string) []int {
@@ -287,6 +291,22 @@ func tokenLens(toks []string) []int {
 		out[i] = len(t)
 	}
 	return out
+}
+
+func pub(id string) string {
+	i := strings.IndexByte(id, '/')
+	if i < 0 {
+		return id
+	}
+	return id[:i]
+}
+
+func slug(id string) string {
+	i := strings.IndexByte(id, '/')
+	if i < 0 {
+		return id
+	}
+	return id[i+1:]
 }
 
 // benchPool measures the production path end-to-end: BrowserGroup + Pool with
@@ -335,7 +355,6 @@ func benchPool(batch, maxChromes int, idleTTL time.Duration) {
 	fills, _, _, _, _, _ := p.Stats()
 	fmt.Printf("bench: cold fill 6 tokens in %s (fills=%d)\n", time.Since(start).Round(time.Millisecond), fills)
 
-	// Drain 6 tokens concurrently (burst of requests) and time the refill.
 	var wg sync.WaitGroup
 	drainStart := time.Now()
 	for i := 0; i < 6; i++ {
@@ -357,8 +376,6 @@ func benchPool(batch, maxChromes int, idleTTL time.Duration) {
 	fmt.Printf("bench: refill 6 tokens in %s (fills=%d takes=%d)\n",
 		time.Since(refillStart).Round(time.Millisecond), fillsAfter, takes)
 
-	// Elastic smoke tail: idle past the recycle TTL and watch the shrinker
-	// walk back down to the floor of 1.
 	if maxChromes > 0 && idleTTL > 0 {
 		fmt.Printf("bench: idling to observe shrink (idle-recycle=%s)…\n", idleTTL)
 		deadline = time.Now().Add(idleTTL + 30*time.Second)
@@ -367,4 +384,189 @@ func benchPool(batch, maxChromes int, idleTTL time.Duration) {
 		}
 		fmt.Printf("bench: after idle chromes=%d (want 1)\n", g.Len())
 	}
+}
+
+// pageResult accumulates one candidate's cold-path timings.
+type pageResult struct {
+	id       string
+	navs     []time.Duration
+	execs    []time.Duration
+	errs     int
+	verifyOK bool
+}
+
+// benchPagesMode times the production cold path for every model playground:
+// NewBrowser (Chrome launch + warm nav to widget-ready — what serve's startup,
+// the recycle rung and re-navigate pay) plus one sticky Extract. One Chrome at
+// a time keeps bandwidth noise out of the comparison; medians over rounds.
+// Each candidate's first token is verified against the predict endpoint once.
+func benchPagesMode(rounds int) {
+	results := map[string]*pageResult{}
+
+	var ids []string
+	for id := range models.Models {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	fmt.Printf("bench-pages: %d candidates x %d cold rounds, sequential\n", len(ids), rounds)
+
+	hc := &http.Client{Timeout: 20 * time.Second}
+	verified := 0
+
+	for _, id := range ids {
+		res := &pageResult{id: id}
+		results[id] = res
+		url := fmt.Sprintf("https://build.nvidia.com/%s/%s/playground", pub(id), slug(id))
+		for r := 0; r < rounds; r++ {
+			t0 := time.Now()
+			b, err := captcha.NewBrowser(context.Background(), captcha.BrowserConfig{Playground: url})
+			nav := time.Since(t0)
+			if err != nil {
+				fmt.Printf("%-55s round %d: NAV FAIL %v\n", id, r+1, err)
+				res.errs++
+				// ponytail: a dead page (retired model) stays dead within one
+				// run — don't burn the remaining rounds' 90s warm timeouts on it.
+				break
+			}
+			res.navs = append(res.navs, nav)
+
+			t1 := time.Now()
+			tok, err := b.Extract(context.Background())
+			exec := time.Since(t1)
+			b.Close()
+			if err != nil {
+				fmt.Printf("%-55s round %d: nav=%s EXEC FAIL %v\n", id, r+1, nav.Round(time.Millisecond), err)
+				res.errs++
+				continue
+			}
+			res.execs = append(res.execs, exec)
+			fmt.Printf("%-55s round %d: nav=%s exec=%s\n", id, r+1,
+				nav.Round(time.Millisecond), exec.Round(time.Millisecond))
+
+			if !res.verifyOK && postVerify(hc, tok) {
+				res.verifyOK = true
+				verified++
+			}
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	fmt.Printf("\nverified-tokens: %d candidates accepted by predict endpoint\n", verified)
+	printPageTable(results)
+}
+
+// postVerify POSTs one minted token to the default model's predict endpoint
+// and reports whether it was accepted (HTTP 200).
+func postVerify(hc *http.Client, tok string) bool {
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		"https://api.ngc.nvidia.com/v2/predict/models/qc69jvmznzxy/minimax-m3",
+		strings.NewReader(`{"model":"minimaxai/minimax-m3","messages":[{"role":"user","content":"hi"}],"max_tokens":8,"stream":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("nv-function-id", "87ea0ddc-cff1-4bca-bf8b-3bd98a35ddd0")
+	req.Header.Set("nv-captcha-token", tok)
+	req.Header.Set("Origin", "https://build.nvidia.com")
+	req.Header.Set("Referer", "https://build.nvidia.com/")
+	resp, err := hc.Do(req)
+	if err != nil || resp == nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == 200
+}
+
+func printPageTable(results map[string]*pageResult) {
+	type row struct {
+		id       string
+		navMed   time.Duration
+		execMed  time.Duration
+		errs     int
+		verifyOK bool
+	}
+	var rows []row
+	for _, res := range results {
+		rows = append(rows, row{
+			id:       res.id,
+			navMed:   medianOf(res.navs),
+			execMed:  medianOf(res.execs),
+			errs:     res.errs,
+			verifyOK: res.verifyOK,
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].navMed < rows[j].navMed })
+	fmt.Printf("%-52s %10s %10s %5s %s\n", "model", "nav-med", "exec-med", "errs", "verify")
+	for i, rw := range rows {
+		if i >= 20 && rw.navMed > rows[4].navMed {
+			continue // print top block + any outliers compactly
+		}
+		v := ""
+		if rw.verifyOK {
+			v = "OK"
+		}
+		fmt.Printf("%-52s %10s %10s %5d %s\n", rw.id,
+			rw.navMed.Round(time.Millisecond), rw.execMed.Round(time.Millisecond), rw.errs, v)
+	}
+}
+
+// medianOf returns the median duration.
+func medianOf(ds []time.Duration) time.Duration {
+	if len(ds) == 0 {
+		return 0
+	}
+	s := append([]time.Duration(nil), ds...)
+	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
+	return s[len(s)/2]
+}
+
+// netlogMode navigates one playground URL and aggregates third-party request
+// hosts seen on the wire during the warm — input for extra blocked-asset
+// patterns in internal/captcha/extract.go.
+func netlogMode(url string) {
+	allocOpts := captcha.ChromeAllocatorOptions()
+	if path := os.Getenv("CHROME_PATH"); path != "" {
+		allocOpts = append(allocOpts, chromedp.ExecPath(path))
+	}
+	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), allocOpts...)
+	defer allocCancel()
+	ctx, cancel := chromedp.NewContext(allocCtx)
+	defer cancel()
+
+	hosts := map[string]int{}
+	chromedp.ListenBrowser(ctx, func(ev interface{}) {
+		if req, ok := ev.(*network.EventRequestWillBeSent); ok {
+			if u, err := url2.Parse(req.Request.URL); err == nil {
+				hosts[u.Host]++
+			}
+		}
+	})
+
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(url),
+		chromedp.WaitReady("body", chromedp.ByQuery),
+		chromedp.WaitReady(`[data-hcaptcha-widget-id]`, chromedp.ByQuery),
+		waitHCaptchaReady(),
+	); err != nil {
+		log.Fatalf("netlog warm: %v", err)
+	}
+	time.Sleep(2 * time.Second)
+
+	fmt.Println("hosts by request count:")
+	type hc struct {
+		host  string
+		count int
+	}
+	var list []hc
+	total := 0
+	for h, c := range hosts {
+		list = append(list, hc{h, c})
+		total += c
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].count > list[j].count })
+	for _, e := range list {
+		tag := ""
+		if e.host != "build.nvidia.com" && !strings.HasPrefix(e.host, "assets") {
+			tag = "  <- third-party"
+		}
+		fmt.Printf("%5d %-60s%s\n", e.count, e.host, tag)
+	}
+	fmt.Printf("total requests: %d\n", total)
 }

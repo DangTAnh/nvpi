@@ -121,15 +121,43 @@ func NewBrowser(parent context.Context, cfg BrowserConfig) (*Browser, error) {
 	}
 
 	// Warm playground once so Extract can skip Navigate in the steady state.
-	warmCtx, warmCancel := context.WithTimeout(browser, 90*time.Second)
-	defer warmCancel()
-	if err := warmPlayground(warmCtx, pgURL); err != nil {
-		b.Close()
-		return nil, fmt.Errorf("captcha browser warm: %w", err)
+	if !cfg.NoWarm {
+		warmCtx, warmCancel := context.WithTimeout(browser, 90*time.Second)
+		defer warmCancel()
+		if err := warmPlayground(warmCtx, pgURL); err != nil {
+			b.Close()
+			return nil, fmt.Errorf("captcha browser warm: %w", err)
+		}
+		b.warmed = true
+		b.lastOK = time.Now()
 	}
+	return b, nil
+}
+
+// ProbeNav re-navigates the sticky tab to url and times the full page warm-up
+// (assets blocked, widget mounted) — the metric playground selection ranks
+// candidates by. On success the tab stays mounted on url, so the selection's
+// winner Chrome can be handed to the pool with its first mint pre-paid.
+func (b *Browser) ProbeNav(ctx context.Context, url string) (time.Duration, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return 0, fmt.Errorf("captcha browser closed")
+	}
+	tctx, cancel := context.WithTimeout(b.browser, reNavTimeout)
+	defer cancel()
+	start := time.Now()
+	if err := warmPlayground(tctx, url); err != nil {
+		b.warmed = false
+		return 0, err
+	}
+	b.pgURL = url
 	b.warmed = true
 	b.lastOK = time.Now()
-	return b, nil
+	// Batch widgets don't survive a navigate — reset like the re-nav path does.
+	b.sitekey = ""
+	b.extraIDs = nil
+	return time.Since(start), nil
 }
 
 // Extract returns a one-shot captcha token from the sticky playground tab.

@@ -19,6 +19,10 @@ type BrowserConfig struct {
 	// is retired but the new one is not yet picked by the registry). Empty
 	// triggers the auto-probe at first warm.
 	Playground string
+	// NoWarm skips the initial playground warm in NewBrowser; the browser then
+	// navigates on first use (or ProbeNav). Used by the playground selector's
+	// probe Chrome, which navigates itself once per candidate.
+	NoWarm bool
 }
 
 func (c BrowserConfig) withDefaults() BrowserConfig {

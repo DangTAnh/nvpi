@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -67,7 +68,8 @@ func main() {
 	poolTTL := flag.Duration("pool-ttl", 90*time.Second, "discard pooled captcha tokens older than this (-auto)")
 	captchaWait := flag.Duration("captcha-wait", 30*time.Second, "max wait for a pooled captcha token per request (0=block until ready); then 503")
 	chromeProxy := flag.String("chrome-proxy", "", "proxy for captcha Chrome and upstream API (e.g. socks5://host:port); falls back to CHROME_PROXY")
-	captchaPlayground := flag.String("captcha-playground", "https://build.nvidia.com/minimaxai/minimax-m3/playground", "playground URL used to mint hCaptcha tokens (one Chrome sticky tab)")
+	captchaPlayground := flag.String("captcha-playground", "", "playground URL pinned for captcha minting; empty = auto-select the fastest alive playground at startup (sliding-window bench, memory in ~/.nvpi/playground-state.json)")
+	selectBudget := flag.Duration("captcha-select-budget", 4*time.Minute, "wall-clock budget for playground auto-selection (-captcha-playground empty); dead pages cost up to 30s each, so a fully-dead window plus rescue sweep needs minutes; past it the decision uses whatever was already measured")
 	defaultModel := flag.String("default-model", "", "rewrite unknown requested models (e.g. Claude Code's builtin claude-*) to this registered model instead of rejecting with 400; empty = strict")
 	refreshRegistry := flag.Bool("refresh-registry", true, "re-fetch the model registry from upstream catalog at startup (falls back to hardcoded list on failure)")
 	registryTimeout := flag.Duration("registry-timeout", 30*time.Second, "timeout for the startup registry refresh")
@@ -137,15 +139,29 @@ func main() {
 		pool    *captcha.Pool
 	)
 	if *auto {
+		pgURL := strings.TrimSpace(*captchaPlayground)
+		var seed *captcha.Browser
+		if pgURL == "" {
+			pgURL, seed = selectPlayground(ctx, proxyURL, *selectBudget)
+		}
+		initial := 1
+		if seed != nil {
+			// Probe Chrome handed over below; a factory launch here would be a
+			// throwaway second Chrome.
+			initial = 0
+		}
 		var err error
-		browser, err = captcha.NewBrowserGroup(ctx, 1, captcha.BrowserConfig{
+		browser, err = captcha.NewBrowserGroup(ctx, initial, captcha.BrowserConfig{
 			Proxy:      proxyURL,
-			Playground: *captchaPlayground,
+			Playground: pgURL,
 		})
 		if err != nil {
 			log.Fatalf("captcha browser: %v", err)
 		}
 		browser.EnableElastic(*chromesMax, *chromeIdleRecycle)
+		if seed != nil {
+			browser.AppendWarmed(seed)
+		}
 		pool = captcha.NewPool(ctx, browser.Extract, captcha.PoolConfig{
 			Size:         *poolSize,
 			Workers:      *poolWorkers,
@@ -305,6 +321,63 @@ func browserChromeCount(browser *captcha.BrowserGroup) int {
 		return 0
 	}
 	return browser.Len()
+}
+
+// selectPlayground benches catalog playgrounds on one throwaway Chrome and
+// returns (winning URL, probe Chrome left mounted on the winner). The Chrome
+// becomes seeded group capacity, so the pool's first mint skips a navigate.
+// Total probe failure falls back to the first catalog entry (nil seed) — the
+// group's own launch then surfaces any hard failure as before.
+func selectPlayground(ctx context.Context, proxyURL string, budget time.Duration) (string, *captcha.Browser) {
+	ids := make([]string, 0, len(models.Models))
+	for id := range models.Models {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	fallback := ""
+	if len(ids) > 0 {
+		fallback = captcha.PlaygroundURL(ids[0])
+	}
+
+	pb, err := captcha.NewBrowser(ctx, captcha.BrowserConfig{Proxy: proxyURL, NoWarm: true})
+	if err != nil {
+		log.Printf("captcha playground select: probe chrome unavailable (%v) — falling back to %s", err, fallback)
+		return fallback, nil
+	}
+	last := ""
+	sel := &captcha.PlaygroundSelector{
+		Budget: budget,
+		Probe: func(pctx context.Context, id string) (time.Duration, error) {
+			last = id
+			return pb.ProbeNav(pctx, captcha.PlaygroundURL(id))
+		},
+	}
+	statePath := captcha.DefaultStatePath()
+	winner, st, err := sel.Select(ctx, captcha.LoadState(statePath), ids)
+	if err != nil {
+		pb.Close()
+		log.Printf("captcha playground select failed (%v) — falling back to %s", err, fallback)
+		return fallback, nil
+	}
+	pgURL := captcha.PlaygroundURL(winner)
+	if last != winner {
+		// Leave the tab on the winner so seeding pays off; a failure here means
+		// the page died in the last seconds — let the group launch fresh.
+		if _, merr := pb.ProbeNav(ctx, pgURL); merr != nil {
+			pb.Close()
+			log.Printf("captcha playground select: mount %s failed (%v) — group launches fresh", pgURL, merr)
+			return pgURL, nil
+		}
+	}
+	if statePath == "" {
+		log.Printf("captcha playground selected %s (no home dir — state not persisted)", pgURL)
+		return pgURL, pb
+	}
+	if serr := captcha.SaveState(statePath, st); serr != nil {
+		log.Printf("captcha playground state save failed: %v", serr)
+	}
+	log.Printf("captcha playground selected %s (%.0fms median)", pgURL, st.Benched[winner].MedianMS)
+	return pgURL, pb
 }
 
 func waitPoolReady(ctx context.Context, pool *captcha.Pool, want int, timeout time.Duration) error {

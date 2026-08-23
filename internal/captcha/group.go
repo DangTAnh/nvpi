@@ -41,12 +41,10 @@ type BrowserGroup struct {
 	closed        bool
 }
 
-// NewBrowserGroup starts n warmed browsers (n Chrome processes). n < 1 means 1.
-// Fixed-size unless EnableElastic is called afterwards.
+// NewBrowserGroup starts n warmed browsers (n Chrome processes). n <= 0 starts
+// empty — elastic spawn-on-pressure or AppendWarmed fills it. Fixed-size
+// unless EnableElastic is called afterwards.
 func NewBrowserGroup(parent context.Context, n int, cfg BrowserConfig) (*BrowserGroup, error) {
-	if n < 1 {
-		n = 1
-	}
 	cfg = cfg.withDefaults()
 	g := &BrowserGroup{
 		parent:         parent,
@@ -73,6 +71,25 @@ func NewBrowserGroup(parent context.Context, n int, cfg BrowserConfig) (*Browser
 		g.free = append(g.free, b)
 	}
 	return g, nil
+}
+
+// AppendWarmed adds an already-warmed browser to the group as free capacity —
+// the playground selector hands over its probe Chrome so the pool's first mint
+// skips a navigate (the winning page is already mounted). Takes ownership: a
+// closed group closes b instead.
+func (g *BrowserGroup) AppendWarmed(b *Browser) {
+	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
+		b.Close()
+		return
+	}
+	g.browsers = append(g.browsers, b)
+	g.lastUsed[b] = time.Now()
+	g.free = append(g.free, b)
+	log.Printf("captcha group: seeded warmed chrome (%d now live)", len(g.browsers))
+	g.notifyLocked()
+	g.mu.Unlock()
 }
 
 // EnableElastic lets the group grow past its initial size under borrow

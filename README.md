@@ -82,6 +82,7 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 | `-warm-timeout` | `3m` | Chờ ≥1 token trước khi serve |
 | `-pool-ttl` | `90s` | Tuổi tối đa token buffer (tự trôi 60–115s theo tỉ lệ stale) |
 | `-captcha-wait` | `30s` | Chờ token khi pool cạn rồi mới 503 |
+| `-captcha-playground` | rỗng = auto | Rỗng: bench cửa sổ trượt 5 trang sống mỗi lần start (`-captcha-select-budget` 4m), champion lưu `~/.nvpi/playground-state.json`; NVIDIA retire model → tự đổi trang mint, không hardcode. Gắn URL để ghim cứng |
 | `-default-model` | rỗng | Rewrite model lạ (VD `claude-*`) về model đăng ký |
 | `-refresh-registry` | `true` | Refresh catalog NVIDIA lúc start (merge, không thay thế — probe fail tạm thời không làm mất model) |
 | `-chrome-proxy` | `CHROME_PROXY` | Proxy cho cả Chrome lẫn upstream (vd `socks5://host:port`) |
