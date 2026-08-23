@@ -248,7 +248,7 @@ type session struct {
 
 func newSession(parent context.Context, v variant) (*session, error) {
 	opts := captcha.ChromeAllocatorOptions()
-	if path := os.Getenv("CHROME_PATH"); path != "" {
+	if path := captcha.ChromeExecPath(); path != "" {
 		opts = append(opts, chromedp.ExecPath(path))
 	}
 	if os.Getenv("CHROMEDP_NO_SANDBOX") == "1" {

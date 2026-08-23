@@ -60,6 +60,21 @@ const stickyMaxIdle = 10 * time.Minute
 // sooner and a hard block surfaces a 503 without a 90s hang per request.
 const reNavTimeout = 30 * time.Second
 
+// ChromeExecPath resolves which browser binary to launch: CHROME_PATH when
+// set, else the repo-local chrome-headless-shell download (pinned version —
+// the mint flow was verified against it), else "" and chromedp falls back to
+// searching for a system Chrome.
+func ChromeExecPath() string {
+	if path := os.Getenv("CHROME_PATH"); path != "" {
+		return path
+	}
+	const local = "chrome-headless-shell-win64/chrome-headless-shell.exe"
+	if _, err := os.Stat(local); err == nil {
+		return local
+	}
+	return ""
+}
+
 // NewBrowser starts a shared Chrome process and warms the playground page.
 // Call Close when done.
 //
@@ -76,7 +91,7 @@ const reNavTimeout = 30 * time.Second
 func NewBrowser(parent context.Context, cfg BrowserConfig) (*Browser, error) {
 	cfg = cfg.withDefaults()
 	allocOpts := ChromeAllocatorOptions()
-	if path := os.Getenv("CHROME_PATH"); path != "" {
+	if path := ChromeExecPath(); path != "" {
 		allocOpts = append(allocOpts, chromedp.ExecPath(path))
 	}
 	if os.Getenv("CHROMEDP_NO_SANDBOX") == "1" {

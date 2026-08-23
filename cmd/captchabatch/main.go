@@ -50,10 +50,8 @@ func main() {
 	}
 
 	allocOpts := captcha.ChromeAllocatorOptions()
-	if path := os.Getenv("CHROME_PATH"); path != "" {
+	if path := captcha.ChromeExecPath(); path != "" {
 		allocOpts = append(allocOpts, chromedp.ExecPath(path))
-	} else if _, err := os.Stat("chrome-headless-shell-win64/chrome-headless-shell.exe"); err == nil {
-		allocOpts = append(allocOpts, chromedp.ExecPath("chrome-headless-shell-win64/chrome-headless-shell.exe"))
 	}
 	if os.Getenv("CHROMEDP_NO_SANDBOX") == "1" {
 		allocOpts = append(allocOpts,
@@ -522,7 +520,7 @@ func medianOf(ds []time.Duration) time.Duration {
 // patterns in internal/captcha/extract.go.
 func netlogMode(url string) {
 	allocOpts := captcha.ChromeAllocatorOptions()
-	if path := os.Getenv("CHROME_PATH"); path != "" {
+	if path := captcha.ChromeExecPath(); path != "" {
 		allocOpts = append(allocOpts, chromedp.ExecPath(path))
 	}
 	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), allocOpts...)

@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"glm52-nvidia/internal/captcha"
+
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 )
@@ -31,7 +33,7 @@ func main() {
 		chromedp.UserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
 		chromedp.WindowSize(1280, 900),
 	)
-	if path := os.Getenv("CHROME_PATH"); path != "" {
+	if path := captcha.ChromeExecPath(); path != "" {
 		allocOpts = append(allocOpts, chromedp.ExecPath(path))
 	}
 	if os.Getenv("CHROMEDP_ALLOW_IMAGES") != "1" {
