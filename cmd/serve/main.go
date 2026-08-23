@@ -153,14 +153,22 @@ func main() {
 				// plain-HTTP scrape source for the sitekey.
 				pgURL = captcha.PlaygroundURL(models.DefaultModel)
 			}
-			skCtx, skCancel := context.WithTimeout(ctx, 2*time.Minute)
-			var skErr error
-			sk, skErr = captcha.FetchSitekeyHTTP(skCtx, nil, pgURL)
-			skCancel()
-			if skErr != nil {
-				log.Printf("captcha harness: sitekey scrape failed (%v); falling back to full-page mint", skErr)
-				useHarness = false
-				pgURL = ""
+			sk = captcha.LoadCachedSitekey()
+			if sk != "" {
+				log.Printf("captcha harness: cached sitekey (<24h old); skipped HTTP scrape. Delete %s to force a re-scrape.",
+					captcha.SitekeyCachePath())
+			} else {
+				skCtx, skCancel := context.WithTimeout(ctx, 2*time.Minute)
+				var skErr error
+				sk, skErr = captcha.FetchSitekeyHTTP(skCtx, nil, pgURL)
+				skCancel()
+				if skErr != nil {
+					log.Printf("captcha harness: sitekey scrape failed (%v); falling back to full-page mint", skErr)
+					useHarness = false
+					pgURL = ""
+				} else {
+					captcha.SaveCachedSitekey(sk)
+				}
 			}
 		}
 		if !useHarness && pgURL == "" {

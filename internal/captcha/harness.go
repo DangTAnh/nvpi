@@ -2,10 +2,13 @@ package captcha
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -119,6 +122,74 @@ func FetchSitekeyHTTP(ctx context.Context, hc *http.Client, pageURL string) (str
 		return h.key, nil
 	}
 	return "", fmt.Errorf("sitekey not found in %d chunks", len(srcs))
+}
+
+// sitekeyCacheTTL bounds how long a scraped sitekey may be reused across
+// restarts. NVIDIA rotates the key rarely (docs) — the TTL caps how long a
+// stale key can linger after a rotation: worst case, mints fail until expiry
+// or `rm ~/.nvpi/sitekey.json`, same failure surface as a mid-process rotation
+// today (key is fixed for the process lifetime either way).
+const sitekeyCacheTTL = 24 * time.Hour
+
+// SitekeyCachePath returns ~/.nvpi/sitekey.json ("" when HOME is unset) —
+// exposed so serve's startup log can tell users how to force a re-scrape.
+func SitekeyCachePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".nvpi", "sitekey.json")
+}
+
+// LoadCachedSitekey returns a cached sitekey when one is fresh for pageURL's
+// origin; missing/corrupt/expired cache yields "" and the caller scrapes.
+func LoadCachedSitekey() string {
+	return loadCachedSitekey(SitekeyCachePath(), time.Now())
+}
+
+func loadCachedSitekey(path string, now time.Time) string {
+	if path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var c struct {
+		Key       string    `json:"sitekey"`
+		ScrapedAt time.Time `json:"scraped_at"`
+	}
+	if json.Unmarshal(data, &c) != nil || c.Key == "" || c.ScrapedAt.IsZero() {
+		return ""
+	}
+	if now.Sub(c.ScrapedAt) > sitekeyCacheTTL {
+		return ""
+	}
+	return c.Key
+}
+
+// SaveCachedSitekey persists a freshly scraped sitekey (atomic tmp+rename so a
+// crash cannot leave a half file). Errors are non-fatal: next start re-scrapes.
+func SaveCachedSitekey(key string) {
+	p := SitekeyCachePath()
+	if p == "" || key == "" {
+		return
+	}
+	data, err := json.Marshal(struct {
+		Key       string    `json:"sitekey"`
+		ScrapedAt time.Time `json:"scraped_at"`
+	}{Key: key, ScrapedAt: time.Now()})
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return
+	}
+	tmp := p + ".tmp"
+	if os.WriteFile(tmp, data, 0o644) != nil {
+		return
+	}
+	_ = os.Rename(tmp, p)
 }
 
 // harnessHTML is the entire replacement document: preconnects for hcaptcha's

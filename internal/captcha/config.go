@@ -28,9 +28,10 @@ type BrowserConfig struct {
 	// the predict API, at a fraction of the RAM per Chrome (~50MB vs
 	// ~150–350MB) with ~2s warms instead of 6–10s. Requires HarnessSitekey.
 	Harness bool
-	// HarnessSitekey is the hCaptcha sitekey for build.nvidia.com, scraped over
-	// plain HTTP by FetchSitekeyHTTP once per process at startup. Fixed for the
-	// process lifetime — NVIDIA rotates it rarely, and a restart re-scrapes.
+	// HarnessSitekey is the hCaptcha sitekey for build.nvidia.com, taken from
+	// the <24h disk cache (~/.nvpi/sitekey.json) or scraped over plain HTTP by
+	// FetchSitekeyHTTP when absent/expired. Fixed for the process lifetime —
+	// NVIDIA rotates it rarely; delete the cache file to force a re-scrape.
 	HarnessSitekey string
 }
 
