@@ -1,0 +1,5 @@
+2026/08/24 00:43:26 model=openai/gpt-oss-120b page=https://build.nvidia.com/openai/gpt-oss-120b/playground
+2026/08/24 00:44:31 sitekey=0c6a1e45-75d7-43cc-b836-a0c9d886b8ee (plain http, 1m5.722s)
+2026/08/24 00:44:35 minted 6/6 token(s) in 3.617s (len[0]=1874)
+2026/08/24 00:46:43 PREDICT status=200 body[:300]="{\"id\":\"chatcmpl-8409d4ac0370d62e\",\"object\":\"chat.completion\",\"created\":1787507202,\"model\":\"openai/gpt-oss-120b\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":null,\"refusal\":null,\"annotations\":null,\"audio\":null,\"function_call\":null,\"tool_calls\":[],\"reasoning\":\"The user says \\\"Say\",\"re"
+POC PASS — harness token accepted by predict endpoint

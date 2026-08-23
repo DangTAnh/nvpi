@@ -1,0 +1,126 @@
+bench-pages: 46 candidates x 3 cold rounds, sequential
+abacusai/dracarys-llama-3_1-70b-instruct                round 1: NAV FAIL captcha browser warm: context deadline exceeded
+bytedance/seed-oss-36b-instruct                         round 1: NAV FAIL captcha browser warm: context deadline exceeded
+deepseek-ai/deepseek-v4-flash                           round 1: NAV FAIL captcha browser warm: context deadline exceeded
+deepseek-ai/deepseek-v4-pro                             round 1: NAV FAIL captcha browser warm: context deadline exceeded
+google/diffusiongemma-26b-a4b-it                        round 1: nav=1.907s exec=1.299s
+google/diffusiongemma-26b-a4b-it                        round 2: nav=1.82s exec=1.262s
+google/diffusiongemma-26b-a4b-it                        round 3: nav=1.8s exec=1.233s
+google/gemma-2-2b-it                                    round 1: NAV FAIL captcha browser warm: context deadline exceeded
+google/gemma-3n-e2b-it                                  round 1: NAV FAIL captcha browser warm: context deadline exceeded
+google/gemma-3n-e4b-it                                  round 1: NAV FAIL captcha browser warm: context deadline exceeded
+google/gemma-4-31b-it                                   round 1: nav=1.902s exec=1.299s
+google/gemma-4-31b-it                                   round 2: nav=1.699s exec=1.217s
+google/gemma-4-31b-it                                   round 3: nav=1.74s exec=1.184s
+meta/llama-3.2-11b-vision-instruct                      round 1: nav=16.81s exec=1.218s
+meta/llama-3.2-11b-vision-instruct                      round 2: nav=16.958s exec=1.262s
+meta/llama-3.2-11b-vision-instruct                      round 3: nav=16.856s exec=1.206s
+meta/llama-3.2-1b-instruct                              round 1: nav=16.735s exec=1.179s
+meta/llama-3.2-1b-instruct                              round 2: nav=16.802s exec=1.235s
+meta/llama-3.2-1b-instruct                              round 3: nav=16.785s exec=1.204s
+meta/llama-3.2-3b-instruct                              round 1: nav=16.708s exec=1.196s
+meta/llama-3.2-3b-instruct                              round 2: nav=16.768s exec=1.286s
+meta/llama-3.2-3b-instruct                              round 3: nav=16.793s exec=1.168s
+meta/llama-3.2-90b-vision-instruct                      round 1: nav=16.849s exec=1.216s
+meta/llama-3.2-90b-vision-instruct                      round 2: nav=16.755s exec=1.233s
+meta/llama-3.2-90b-vision-instruct                      round 3: nav=16.8s exec=1.184s
+meta/llama-3_1-70b-instruct                             round 1: nav=1.82s exec=1.179s
+meta/llama-3_1-70b-instruct                             round 2: nav=1.996s exec=1.182s
+meta/llama-3_1-70b-instruct                             round 3: nav=1.895s exec=1.189s
+meta/llama-3_1-8b-instruct                              round 1: nav=2.082s exec=1.313s
+meta/llama-3_1-8b-instruct                              round 2: nav=1.915s exec=1.22s
+meta/llama-3_1-8b-instruct                              round 3: nav=1.797s exec=1.243s
+meta/llama-3_3-70b-instruct                             round 1: nav=1.768s exec=1.148s
+meta/llama-3_3-70b-instruct                             round 2: nav=1.878s exec=1.327s
+meta/llama-3_3-70b-instruct                             round 3: nav=1.771s exec=1.19s
+meta/llama-4-maverick-17b-128e-instruct                 round 1: NAV FAIL captcha browser warm: context deadline exceeded
+minimaxai/minimax-m2.7                                  round 1: NAV FAIL captcha browser warm: context deadline exceeded
+minimaxai/minimax-m3                                    round 1: nav=2.273s exec=1.177s
+minimaxai/minimax-m3                                    round 2: nav=1.863s exec=1.194s
+minimaxai/minimax-m3                                    round 3: nav=2.247s exec=1.2s
+mistralai/ministral-14b-instruct-2512                   round 1: NAV FAIL captcha browser warm: context deadline exceeded
+mistralai/mistral-medium-3.5-128b                       round 1: NAV FAIL captcha browser warm: context deadline exceeded
+mistralai/mistral-nemotron                              round 1: nav=2.055s exec=1.147s
+mistralai/mistral-nemotron                              round 2: nav=2.593s exec=1.284s
+mistralai/mistral-nemotron                              round 3: nav=1.766s exec=1.289s
+mistralai/mistral-small-4-119b-2603                     round 1: NAV FAIL captcha browser warm: context deadline exceeded
+mistralai/mixtral-8x7b-instruct                         round 1: NAV FAIL captcha browser warm: context deadline exceeded
+nvidia/ising-calibration-1.5-31b                        round 1: nav=1.803s exec=1.189s
+nvidia/ising-calibration-1.5-31b                        round 2: nav=1.909s exec=1.196s
+nvidia/ising-calibration-1.5-31b                        round 3: nav=1.872s exec=1.182s
+nvidia/llama-3.1-nemotron-nano-vl-8b-v1                 round 1: nav=16.763s exec=1.143s
+nvidia/llama-3.1-nemotron-nano-vl-8b-v1                 round 2: nav=16.762s exec=1.202s
+nvidia/llama-3.1-nemotron-nano-vl-8b-v1                 round 3: nav=16.777s exec=1.213s
+nvidia/llama-3_1-nemotron-nano-8b-v1                    round 1: nav=16.75s exec=1.199s
+nvidia/llama-3_1-nemotron-nano-8b-v1                    round 2: nav=16.79s exec=1.274s
+nvidia/llama-3_1-nemotron-nano-8b-v1                    round 3: nav=16.797s exec=1.122s
+nvidia/llama-3_3-nemotron-super-49b-v1                  round 1: nav=16.79s exec=1.175s
+nvidia/llama-3_3-nemotron-super-49b-v1                  round 2: nav=16.766s exec=1.148s
+nvidia/llama-3_3-nemotron-super-49b-v1                  round 3: nav=16.736s exec=1.134s
+nvidia/llama-3_3-nemotron-super-49b-v1_5                round 1: nav=2.709s exec=1.244s
+nvidia/llama-3_3-nemotron-super-49b-v1_5                round 2: nav=1.761s exec=1.135s
+nvidia/llama-3_3-nemotron-super-49b-v1_5                round 3: nav=1.784s exec=1.117s
+nvidia/nemotron-3-nano-30b-a3b                          round 1: nav=1.773s exec=1.162s
+nvidia/nemotron-3-nano-30b-a3b                          round 2: nav=1.796s exec=1.164s
+nvidia/nemotron-3-nano-30b-a3b                          round 3: nav=1.947s exec=1.215s
+nvidia/nemotron-3-nano-omni-30b-a3b-reasoning           round 1: nav=1.948s exec=1.185s
+nvidia/nemotron-3-nano-omni-30b-a3b-reasoning           round 2: nav=2.724s exec=1.187s
+nvidia/nemotron-3-nano-omni-30b-a3b-reasoning           round 3: nav=1.755s exec=1.142s
+nvidia/nemotron-3-super-120b-a12b                       round 1: nav=1.758s exec=1.156s
+nvidia/nemotron-3-super-120b-a12b                       round 2: nav=1.889s exec=1.163s
+nvidia/nemotron-3-super-120b-a12b                       round 3: nav=1.704s exec=1.284s
+nvidia/nemotron-3-ultra-550b-a55b                       round 1: nav=1.827s exec=1.223s
+nvidia/nemotron-3-ultra-550b-a55b                       round 2: nav=1.906s exec=1.192s
+nvidia/nemotron-3-ultra-550b-a55b                       round 3: nav=1.787s exec=1.169s
+nvidia/nemotron-4-340b-instruct                         round 1: NAV FAIL captcha browser warm: context deadline exceeded
+nvidia/nemotron-mini-4b-instruct                        round 1: nav=1.892s exec=1.243s
+nvidia/nemotron-mini-4b-instruct                        round 2: nav=2.638s exec=1.188s
+nvidia/nemotron-mini-4b-instruct                        round 3: nav=1.963s exec=1.151s
+nvidia/nemotron-nano-12b-v2-vl                          round 1: nav=16.742s exec=1.176s
+nvidia/nemotron-nano-12b-v2-vl                          round 2: nav=16.934s exec=1.217s
+nvidia/nemotron-nano-12b-v2-vl                          round 3: nav=16.813s exec=1.208s
+nvidia/nvidia-nemotron-nano-9b-v2                       round 1: nav=16.766s exec=1.177s
+nvidia/nvidia-nemotron-nano-9b-v2                       round 2: nav=16.761s exec=1.236s
+nvidia/nvidia-nemotron-nano-9b-v2                       round 3: nav=16.917s exec=1.22s
+openai/gpt-oss-120b                                     round 1: nav=1.773s exec=1.182s
+openai/gpt-oss-120b                                     round 2: nav=1.792s exec=1.168s
+openai/gpt-oss-120b                                     round 3: nav=2.193s exec=1.217s
+openai/gpt-oss-20b                                      round 1: nav=1.827s exec=1.244s
+openai/gpt-oss-20b                                      round 2: nav=1.751s exec=1.202s
+openai/gpt-oss-20b                                      round 3: nav=1.787s exec=1.204s
+poolside/laguna-xs-2.1                                  round 1: nav=1.911s exec=1.215s
+poolside/laguna-xs-2.1                                  round 2: nav=1.75s exec=1.156s
+poolside/laguna-xs-2.1                                  round 3: nav=2.09s exec=1.221s
+qwen/qwen3-next-80b-a3b-instruct                        round 1: NAV FAIL captcha browser warm: context deadline exceeded
+qwen/qwen3.5-397b-a17b                                  round 1: NAV FAIL captcha browser warm: context deadline exceeded
+sarvamai/sarvam-m                                       round 1: NAV FAIL captcha browser warm: context deadline exceeded
+stepfun-ai/step-3.5-flash                               round 1: NAV FAIL captcha browser warm: context deadline exceeded
+stepfun-ai/step-3.7-flash                               round 1: nav=1.977s exec=1.236s
+stepfun-ai/step-3.7-flash                               round 2: nav=1.807s exec=1.157s
+stepfun-ai/step-3.7-flash                               round 3: nav=1.891s exec=6.996s
+thinkingmachines/inkling                                round 1: nav=1.91s exec=1.154s
+thinkingmachines/inkling                                round 2: nav=1.97s exec=1.166s
+thinkingmachines/inkling                                round 3: nav=1.788s exec=1.218s
+
+verified-tokens: 28 candidates accepted by predict endpoint
+model                                                   nav-med   exec-med  errs verify
+mistralai/mixtral-8x7b-instruct                              0s         0s     1 
+nvidia/nemotron-4-340b-instruct                              0s         0s     1 
+mistralai/ministral-14b-instruct-2512                        0s         0s     1 
+mistralai/mistral-small-4-119b-2603                          0s         0s     1 
+abacusai/dracarys-llama-3_1-70b-instruct                     0s         0s     1 
+sarvamai/sarvam-m                                            0s         0s     1 
+google/gemma-3n-e2b-it                                       0s         0s     1 
+minimaxai/minimax-m2.7                                       0s         0s     1 
+stepfun-ai/step-3.5-flash                                    0s         0s     1 
+mistralai/mistral-medium-3.5-128b                            0s         0s     1 
+bytedance/seed-oss-36b-instruct                              0s         0s     1 
+deepseek-ai/deepseek-v4-flash                                0s         0s     1 
+google/gemma-3n-e4b-it                                       0s         0s     1 
+meta/llama-4-maverick-17b-128e-instruct                      0s         0s     1 
+deepseek-ai/deepseek-v4-pro                                  0s         0s     1 
+qwen/qwen3.5-397b-a17b                                       0s         0s     1 
+google/gemma-2-2b-it                                         0s         0s     1 
+qwen/qwen3-next-80b-a3b-instruct                             0s         0s     1 
+google/gemma-4-31b-it                                     1.74s     1.217s     0 OK
+nvidia/nemotron-3-super-120b-a12b                        1.758s     1.163s     0 OK
