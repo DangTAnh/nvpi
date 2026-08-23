@@ -121,10 +121,12 @@ func FetchSitekeyHTTP(ctx context.Context, hc *http.Client, pageURL string) (str
 	return "", fmt.Errorf("sitekey not found in %d chunks", len(srcs))
 }
 
-// harnessHTML is the entire replacement document: hcaptcha api.js plus an
-// onload stub. No NVIDIA code ships.
+// harnessHTML is the entire replacement document: preconnects for hcaptcha's
+// asset origins plus api.js and an onload stub. No NVIDIA code ships.
 func harnessHTML() string {
 	return `<!doctype html><html><head><meta charset="utf-8"><title>playground</title>` +
+		`<link rel="preconnect" href="https://js.hcaptcha.com" crossorigin>` +
+		`<link rel="preconnect" href="https://newassets.hcaptcha.com" crossorigin>` +
 		`<script src="https://js.hcaptcha.com/1/api.js?onload=onHcReady&render=explicit&uj=false"></script>` +
 		`</head><body><div id="h0" style="display:none"></div>` +
 		`<script>window.onHcReady=function(){};</script></body></html>`
