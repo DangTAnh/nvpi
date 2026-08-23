@@ -115,9 +115,9 @@ Một số tinh chỉnh có thể có giá trị, dựa trên đọc code nhưng
 4. ~~**`maxAttempts=3` trong doPredict**~~ — ĐÃ LÀM: tách 2 budget
    (`maxCaptchaRetries=2`, ladder ≤5, worst case 8 send), `stale_leases`
    đếm riêng và lộ qua `/api/status`.
-5. **Chrome warm trên 1 model cố định** (`playgroundURL` = minimax-m3) — nếu registry
-   có nhiều model, mỗi request tới model khác force re-navigate. Cần warm theo
-   model hoặc cache sticky tab per model (phức toán hơn).
+5. ~~**Chrome warm trên 1 model cố định** (`playgroundURL` = minimax-m3)~~ — ĐÃ LÀM:
+   auto-select cửa sổ trượt chọn trang mint nhanh nhất còn sống mỗi lần start,
+   champion lưu `~/.nvpi/playground-state.json` (xem phụ lục bên dưới).
 
 Những cái C này chỉ đáng làm khi A/B chưa đủ. Ponytail nguyên tắc: fix root
 (A) trước, rồi mới bàn tune.
@@ -136,3 +136,22 @@ Những cái C này chỉ đáng làm khi A/B chưa đủ. Ponytail nguyên tắ
 Bước tiếp theo cụ thể: tôi chạy thử một request predict với `nvapi-` key (cần
 user cấp key hoặc tự đăng ký) để verify điểm A. Muốn tôi viết probe script
 để verify không?
+
+---
+
+## Phụ lục: bench trang playground (2026-08-23)
+
+Số liệu tham khảo từ `cmd/captchabatch -bench-pages 3` quét toàn bộ 58 model
+hardcode (3 cold rounds mỗi trang, Chrome launch + warm đầy đủ):
+
+- **29/58 trang sống, 29 chết** (widget không mount — retire). Tỷ lệ chết ~50%
+  xác nhận đúng rủi ro mà auto-select sinh ra để xử lý.
+- **Nhanh nhất**: `nvidia/nemotron-3-nano-30b-a3b` 2.44s ·
+  `nvidia/ising-calibration-1.5-31b` 2.45s ·
+  `nvidia/llama-3_3-nemotron-super-49b-v1_5` 2.48s · `minimaxai/minimax-m3`
+  2.48s · `nvidia/nemotron-3-super-120b-a12b` 2.50s.
+- **Chậm nhất còn sống**: `nemotron-nano-12b-v2-vl` 18.9s, họ `llama-3.2`
+  vision 17.6–18.2s — ~7× chậm hơn top.
+
+Ý nghĩa: chọn đúng trang mint tiết kiệm ~15s mỗi lần launch/re-navigate;
+selector tự hội tụ về nhóm ~2.4s qua state, không cần dữ liệu cứng này.
