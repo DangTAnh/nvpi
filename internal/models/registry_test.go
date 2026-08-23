@@ -151,20 +151,7 @@ func TestContextLengths(t *testing.T) {
 	}
 
 	unresolved := []string{
-		"01-ai/yi-large",
-		"databricks/dbrx-instruct",
-		"google/codegemma-7b",
-		"google/gemma-2b",
-		"google/recurrentgemma-2b",
 		"mistralai/mistral-nemotron",
-		"nvidia/mistral-nemo-minitron-8b-8k-instruct",
-		"nvidia/nemotron-4-340b-instruct",
-		"thinkingmachines/inkling",
-		"writer/palmyra-creative-122b",
-		"writer/palmyra-fin-70b-32k",
-		"writer/palmyra-med-70b",
-		"writer/palmyra-med-70b-32k",
-		"zyphra/zamba2-7b-instruct",
 	}
 	for _, model := range unresolved {
 		info, err := Lookup(model)

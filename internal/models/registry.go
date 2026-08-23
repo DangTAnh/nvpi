@@ -93,24 +93,18 @@ const DefaultModel = "minimaxai/minimax-m3"
 //     Skipped until runtime capture is implemented.
 //
 // Function ids are almost always unique per model, but NVIDIA aliases some
-// backend versions to one NVCF function — e.g. nvidia/ising-calibration-1-35b-a3b
-// and nvidia/ising-calibration-1.5-31b share 499210d3. That is fine: the
+// backend versions to one NVCF function. That is fine: the
 // predict endpoint is keyed by namespace/slug, which IS unique per registry key.
 var Models = map[string]ModelInfo{
-	"01-ai/yi-large": {Slug: "yi-large", Namespace: Namespace, FunctionID: "23bd454d-b225-49a3-8118-582a62fc51b8"},
 	"abacusai/dracarys-llama-3_1-70b-instruct":      {Slug: "dracarys-llama-3_1-70b-instruct", Namespace: Namespace, FunctionID: "d27bf72f-ff2f-4443-95b4-5f06f85f72e5", ContextLength: 131072},
 	"bytedance/seed-oss-36b-instruct":               {Slug: "seed-oss-36b-instruct", Namespace: Namespace, FunctionID: "a29b2935-0a45-4dd8-a1e7-66f9fd5f612b", ContextLength: 524288},
-	"databricks/dbrx-instruct":                      {Slug: "dbrx-instruct", Namespace: Namespace, FunctionID: "3d6c2ff8-8bfc-4d10-8fd0-b7337288e869"},
 	"deepseek-ai/deepseek-v4-flash":                 {Slug: "deepseek-v4-flash", Namespace: Namespace, FunctionID: "52e1ddb6-c745-4802-93f5-ba012d04c336", ContextLength: 1048576},
 	"deepseek-ai/deepseek-v4-pro":                   {Slug: "deepseek-v4-pro", Namespace: Namespace, FunctionID: "74f02205-c7ba-438f-b81a-2537955bd7ec", ContextLength: 1048576},
-	"google/codegemma-7b":                           {Slug: "codegemma-7b", Namespace: Namespace, FunctionID: "7dfc10a8-3cc4-448e-97c1-2213308dc222"},
 	"google/diffusiongemma-26b-a4b-it":              {Slug: "diffusiongemma-26b-a4b-it", Namespace: Namespace, FunctionID: "ffd13b18-1c55-4a7a-b71a-acbfde9ce8a0", ContextLength: 262144},
 	"google/gemma-2-2b-it":                          {Slug: "gemma-2-2b-it", Namespace: Namespace, FunctionID: "b24f0b9b-17f0-4fbf-bbd6-1d01394652cf", ContextLength: 8192},
-	"google/gemma-2b":                               {Slug: "gemma-2b", Namespace: Namespace, FunctionID: "04174188-f742-4069-9e72-d77c2b77d3cb"},
 	"google/gemma-3n-e2b-it":                        {Slug: "gemma-3n-e2b-it", Namespace: Namespace, FunctionID: "73a53951-edfe-4e94-89b0-7101a3ba17ee", ContextLength: 32768},
 	"google/gemma-3n-e4b-it":                        {Slug: "gemma-3n-e4b-it", Namespace: Namespace, FunctionID: "cff91490-4301-4338-8fc7-66d5c0f913b7", ContextLength: 32768},
 	"google/gemma-4-31b-it":                         {Slug: "gemma-4-31b-it", Namespace: Namespace, FunctionID: "48c619ec-c254-48da-8fcc-6ef8a04fed6e", ContextLength: 262144},
-	"google/recurrentgemma-2b":                      {Slug: "recurrentgemma-2b", Namespace: Namespace, FunctionID: "2f495340-a99f-4b4b-89bd-1beb003dd896"},
 	"meta/llama-3.2-11b-vision-instruct":            {Slug: "llama-3.2-11b-vision-instruct", Namespace: Namespace, FunctionID: "9fa6fd04-ba2c-4bb3-90b7-ede407a9290f", ContextLength: 131072},
 	"meta/llama-3.2-1b-instruct":                    {Slug: "llama-3.2-1b-instruct", Namespace: Namespace, FunctionID: "d33e2ae1-8d2a-4cf8-b622-c98f8e0e550b", ContextLength: 131072},
 	"meta/llama-3.2-3b-instruct":                    {Slug: "llama-3.2-3b-instruct", Namespace: Namespace, FunctionID: "4f1c926f-42aa-4b52-9ac9-c2a2098e432f", ContextLength: 131072},
@@ -126,13 +120,11 @@ var Models = map[string]ModelInfo{
 	"mistralai/mistral-nemotron":                    {Slug: "mistral-nemotron", Namespace: Namespace, FunctionID: "f81394d8-63c0-4023-afa2-7ad11aa54ca3"},
 	"mistralai/mistral-small-4-119b-2603":           {Slug: "mistral-small-4-119b-2603", Namespace: Namespace, FunctionID: "a9343856-38cc-453f-9e65-3f8c856d0555", ContextLength: 262144},
 	"mistralai/mixtral-8x7b-instruct":               {Slug: "mixtral-8x7b-instruct", Namespace: Namespace, FunctionID: "a1e53ece-bff4-44d1-8b13-c009e5bf47f6", ContextLength: 32768},
-	"nvidia/ising-calibration-1-35b-a3b":            {Slug: "ising-calibration-1-35b-a3b", Namespace: Namespace, FunctionID: "499210d3-3bf7-44bf-88b5-9460edfa8a38", ContextLength: 262144},
 	"nvidia/ising-calibration-1.5-31b":              {Slug: "ising-calibration-1.5-31b", Namespace: Namespace, FunctionID: "499210d3-3bf7-44bf-88b5-9460edfa8a38", ContextLength: 262144},
 	"nvidia/llama-3.1-nemotron-nano-vl-8b-v1":       {Slug: "llama-3.1-nemotron-nano-vl-8b-v1", Namespace: Namespace, FunctionID: "5756401f-7f6e-4a22-bb63-2afc1e1ced06", ContextLength: 16384},
 	"nvidia/llama-3_1-nemotron-nano-8b-v1":          {Slug: "llama-3_1-nemotron-nano-8b-v1", Namespace: Namespace, FunctionID: "07587d89-2056-4eb8-a448-4b05463d2478", ContextLength: 131072},
 	"nvidia/llama-3_3-nemotron-super-49b-v1":        {Slug: "llama-3_3-nemotron-super-49b-v1", Namespace: Namespace, FunctionID: "a2646582-44bd-4899-bdf4-acf8c9df702c", ContextLength: 131072},
 	"nvidia/llama-3_3-nemotron-super-49b-v1_5":      {Slug: "llama-3_3-nemotron-super-49b-v1_5", Namespace: Namespace, FunctionID: "50b12b3b-a571-46a3-968c-c13662f6402e", ContextLength: 131072},
-	"nvidia/mistral-nemo-minitron-8b-8k-instruct":   {Slug: "mistral-nemo-minitron-8b-8k-instruct", Namespace: Namespace, FunctionID: "5aa06dd2-0a02-4a5d-be4c-bf88e956965d"},
 	"nvidia/nemotron-3-nano-30b-a3b":                {Slug: "nemotron-3-nano-30b-a3b", Namespace: Namespace, FunctionID: "2b2dcd47-c858-425a-9c04-4cacf2eac993", ContextLength: 262144},
 	"nvidia/nemotron-3-nano-omni-30b-a3b-reasoning": {Slug: "nemotron-3-nano-omni-30b-a3b-reasoning", Namespace: Namespace, FunctionID: "c4ed50ff-b5c3-409d-ab57-b79c33f5bb39", ContextLength: 262144},
 	"nvidia/nemotron-3-super-120b-a12b":             {Slug: "nemotron-3-super-120b-a12b", Namespace: Namespace, FunctionID: "ac74040f-9fc9-4c5e-ac74-279ba5161d69", ContextLength: 1048576},
@@ -150,11 +142,6 @@ var Models = map[string]ModelInfo{
 	"stepfun-ai/step-3.5-flash":                     {Slug: "step-3.5-flash", Namespace: Namespace, FunctionID: "c64334de-a2b5-49bf-b477-af9d8e86af06", ContextLength: 262144},
 	"stepfun-ai/step-3.7-flash":                     {Slug: "step-3.7-flash", Namespace: Namespace, FunctionID: "44e35036-2c6d-43c1-b875-e48aa5bf11db", ContextLength: 262144},
 	"thinkingmachines/inkling":                      {Slug: "inkling", Namespace: Namespace, FunctionID: "e972e88f-cd11-45ef-86d2-6802da998eca"},
-	"writer/palmyra-creative-122b":                  {Slug: "palmyra-creative-122b", Namespace: Namespace, FunctionID: "00bdd0a7-e38f-4423-9007-c4d8730a3f78"},
-	"writer/palmyra-fin-70b-32k":                    {Slug: "palmyra-fin-70b-32k", Namespace: Namespace, FunctionID: "316490c6-f1ed-41f9-9da8-3fa9e885653b"},
-	"writer/palmyra-med-70b":                        {Slug: "palmyra-med-70b", Namespace: Namespace, FunctionID: "aab71274-5281-4941-b0b8-20f339d1fc7e"},
-	"writer/palmyra-med-70b-32k":                    {Slug: "palmyra-med-70b-32k", Namespace: Namespace, FunctionID: "d6faa974-3591-49a4-963d-97221d074b2e"},
-	"zyphra/zamba2-7b-instruct":                     {Slug: "zamba2-7b-instruct", Namespace: Namespace, FunctionID: "8378ffb2-51b0-4140-9684-dda1889373e6"},
 }
 
 // ErrUnknownModel is returned when model is not in the registry.

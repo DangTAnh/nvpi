@@ -101,6 +101,7 @@ docker compose up --build -d     # -auto -addr :8080, shm 2GB cho Chrome
 | `cmd/hangbench` | Bench độ trễ/khung treo pool |
 | `cmd/streambench` | Bench SSE coalescing |
 | `cmd/getsitkey` | In sitekey hCaptcha bằng cách nghe network traffic |
+| `cmd/probehard` | Probe registry hardcode theo tín hiệu `modelCapability` — liệt kê model retire để prune |
 | `cmd/cacheprobe`, `cmd/captchaopt` | So chiến lược extract/probe |
 
 ## License
