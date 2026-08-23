@@ -27,6 +27,57 @@ func TestProbeRegexes(t *testing.T) {
 			}
 		}
 	}
+
+	if m := outputModalitiesRE.FindSubmatch([]byte(body)); m == nil {
+		t.Fatal("outputModalitiesRE did not match")
+	} else if got := string(m[1]); got != `\"Text\"` {
+		t.Fatalf("outputModalitiesRE captured %q, want escaped \"Text\"", got)
+	}
+}
+
+// TestParseOutputModalities pins the keep/drop rule: drop only when the field
+// exists AND lacks "Text"; absence of the field (or a malformed page) keeps.
+func TestParseOutputModalities(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		found   bool
+		hasText bool
+	}{
+		{
+			name:    "text output keeps",
+			body:    `\"inputModalities\":[\"Text\",\"Image\"],\"outputModalities\":[\"Text\"]`,
+			found:   true,
+			hasText: true,
+		},
+		{
+			name:    "image-only output drops",
+			body:    `\"outputModalities\":[\"Image\"]`,
+			found:   true,
+			hasText: false,
+		},
+		{
+			name:    "empty array drops",
+			body:    `\"outputModalities\":[]`,
+			found:   true,
+			hasText: false,
+		},
+		{
+			name:    "field absent keeps (no signal)",
+			body:    `\"specifications\":{\"contextLength\":4096}`,
+			found:   false,
+			hasText: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotFound, gotHasText := parseOutputModalities([]byte(tt.body))
+			if gotFound != tt.found || gotHasText != tt.hasText {
+				t.Fatalf("parseOutputModalities(%q) = (%v,%v), want (%v,%v)",
+					tt.body, gotFound, gotHasText, tt.found, tt.hasText)
+			}
+		})
+	}
 }
 
 // TestMergeRegistry pins the three merge buckets of Refresh: fresh probe data

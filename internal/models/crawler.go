@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -205,9 +206,16 @@ func probeQueues(ctx context.Context, hc *http.Client, ids []string, concurrency
 			// Capability + context length probe are best-effort and run after
 			// the queue check so a retired model is dropped before we waste a
 			// page fetch.
-			caps, ctxLen := probeCapabilitiesAndContext(ctx, hc, id)
+			caps, ctxLen, nonText := probeCapabilitiesAndContext(ctx, hc, id)
 
 			mu.Lock()
+			if nonText {
+				// Page clearly declares non-Text outputs (e.g. image/video
+				// generation) — not chat-servable, keep it out of the registry.
+				res.Skipped++
+				mu.Unlock()
+				return
+			}
 			if caps != nil {
 				res.WithCaps++
 			}
@@ -292,47 +300,72 @@ var capabilityJSONRE = regexp.MustCompile(`\\"functionCalling\\":(true|false),\\
 // minimax-m3, 32768 for gemma-3n-e4b-it). 0 when absent.
 var contextLengthRE = regexp.MustCompile(`\\"contextLength\\":([0-9]+)`)
 
+// outputModalitiesRE captures `\\"outputModalities\\":[...]` from the same
+// specifications JSON literal (e.g. [\"Text\"] or [\"Image\",\"Video\"]). The
+// gateway only serves chat/text completions, so a model whose declared outputs
+// exclude Text is filtered out of refreshed registries.
+var outputModalitiesRE = regexp.MustCompile(`\\"outputModalities\\":\[([^]]*)\]`)
+
+// parseOutputModalities reports whether the page declares an outputModalities
+// array and whether that array contains "Text". found=false (field absent,
+// page malformed) carries no signal — the caller keeps the model; a model is
+// dropped only when the field exists and clearly lacks Text.
+func parseOutputModalities(body []byte) (found, hasText bool) {
+	m := outputModalitiesRE.FindSubmatch(body)
+	if m == nil {
+		return false, false
+	}
+	return true, strings.Contains(string(m[1]), "Text")
+}
+
 // probeCapabilitiesAndContext fetches the playground HTML once and extracts
-// both the capability flags and the contextLength. Returns (nil, 0) when the
-// page is unreachable / malformed — neither field is worth guessing. A page
+// both the capability flags and the contextLength. Returns nonText=true when
+// the page declares an outputModalities array without "Text" — such models are
+// not chat/text and must not enter the discovered map. Returns (nil, 0) when
+// the page is unreachable / malformed — neither field is worth guessing. A page
 // that carries only one of the two is still useful; we return whatever we
 // found.
-func probeCapabilitiesAndContext(ctx context.Context, hc *http.Client, id string) (*ModelCapability, int) {
+func probeCapabilitiesAndContext(ctx context.Context, hc *http.Client, id string) (caps *ModelCapability, ctxLen int, nonText bool) {
 	pub, slug, ok := splitPublisherSlug(id)
 	if !ok {
-		return nil, 0
+		return nil, 0, false
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf(playgroundURLFmt, pub, slug), nil)
 	if err != nil {
-		return nil, 0
+		return nil, 0, false
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, 0
+		return nil, 0, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, 0
+		return nil, 0, false
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, 0
+		return nil, 0, false
 	}
 
-	var caps *ModelCapability
+	// Non-text outputs are disqualifying even when everything else parses.
+	if found, hasText := parseOutputModalities(body); found && !hasText {
+		return nil, 0, true
+	}
+
+	var capsOut *ModelCapability
 	if m := capabilityJSONRE.FindSubmatch(body); m != nil {
-		caps = &ModelCapability{
+		capsOut = &ModelCapability{
 			ToolCalling:      string(m[1]) == "true",
 			StructuredOutput: string(m[2]) == "true",
 			Reasoning:        string(m[3]) == "true",
 		}
 	}
 
-	ctxLen := 0
+	ctxLen = 0
 	if m := contextLengthRE.FindSubmatch(body); m != nil {
 		// ponytail: parseInt is one line; strconv.Atoi + err check is two.
 		// A bad regex match (impossible: `[0-9]+`) would still surface as 0.
 		ctxLen, _ = strconv.Atoi(string(m[1]))
 	}
-	return caps, ctxLen
+	return capsOut, ctxLen, false
 }
