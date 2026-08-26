@@ -115,8 +115,9 @@ func uuid42(s string) bool {
 }
 
 // ContextLength values scraped from the playground pages'
-// `\"contextLength\":<int>` literal (same source as crawler.go's
-// contextLengthRE). Pages that did not inline the field are absent here and
+// `\"contextLength\":<int>` literal. The crawler no longer parses that field
+// (NVIDIA dropped the inline literal), so these pinned values are historical
+// — pages that did not inline the field are absent here and
 // must stay 0 — callers apply their own default (see ModelInfo.ContextLength).
 func TestContextLengths(t *testing.T) {
 	resolved := map[string]int{

@@ -1,14 +1,16 @@
 package models
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"regexp"
-	"strconv"
+	"os"
+	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -25,19 +27,16 @@ import (
 //		→ {"functionId":"<uuid>", "queues":[...]} on success
 //		→ 404 / non-JSON on retired models (skip silently)
 //
-// Capabilities are scraped from the playground HTML:
-//	GET https://build.nvidia.com/<publisher>/<slug>
-//		→ next.js SSR HTML carrying an embedded JSON literal like
-//		  {\"functionCalling\":true,\"structuredOutput\":true,\"reasoning\":true}
-//		  The visible "Capabilities" sidebar is rendered client-side from the
-//		  same data, so we cannot parse the rendered DOM without a JS engine.
-//
-// Text filter (2026-08-23): a model enters the refreshed registry only when
-// its page carries a FULL modelCapability object — the chat-playground signal
-// (pageIsText). outputModalities proved unreliable and was removed as the
-// signal: embedding pages render an empty array or omit it, while ASR/retrieval
-// pages omit modelCapability entirely; bge-m3 additionally shows that an
-// object with only functionCalling is an embedding stub, not a chat page.
+// Text filter (2026-08-24): a model enters the refreshed registry only when
+// its /playground page exists:
+//	GET https://build.nvidia.com/<publisher>/<slug>/playground
+// build.nvidia.com answers HTTP 200 for every such path (the Next.js shell is
+// flushed before the route resolves), so existence is read from the RSC
+// payload: a missing playground inlines the error digest
+// NEXT_HTTP_ERROR_FALLBACK;404 — verified live 2026-08-24 (deepseek-r1 and
+// llama-3_3-70b-instruct lack the digest; bge-m3, riva-asr and bogus slugs
+// carry it). The modelCapability JSON literal this filter used before is no
+// longer inlined into the SSR HTML at all.
 //
 // ponytail: package-private constants + 3 fetch helpers + bounded concurrent
 // probe. If the catalog call fails we keep the hardcoded registry — refresh
@@ -46,7 +45,7 @@ import (
 const (
 	catalogURL       = "https://integrate.api.nvidia.com/v1/models"
 	queueURLBase     = "https://buildapi.ngc.nvidia.com/v2/predict/queues/models/" + Namespace + "/"
-	playgroundURLFmt = "https://build.nvidia.com/%s/%s"
+	playgroundURLFmt = "https://build.nvidia.com/%s/%s/playground"
 )
 
 // RefreshOptions tunes the crawler. Zero values pick conservative defaults.
@@ -62,7 +61,8 @@ type RefreshResult struct {
 	Probed   int // entries actually hit by the queue probe
 	OK       int // entries that returned a functionId
 	Skipped  int // probe failures (retired, timeout, decode)
-	WithCaps int // entries whose capability JSON literal parsed successfully
+	WithCaps int // entries whose /playground page exists (text models)
+	Cached   int // WithCaps entries served from the known-text cache, unprobed
 	Duration time.Duration
 }
 
@@ -78,7 +78,11 @@ type RefreshResult struct {
 // which sees the new map on the next call.
 func Refresh(ctx context.Context, opts RefreshOptions) (RefreshResult, error) {
 	if opts.Timeout <= 0 {
-		opts.Timeout = 30 * time.Second
+		// Ceiling only — Refresh returns as soon as every probe finishes. The
+		// two-fetch pipeline (~100 catalog entries × queue + playground page)
+		// needs minutes under CDN throttling; a short ceiling silently drops
+		// every model it didn't reach.
+		opts.Timeout = 5 * time.Minute
 	}
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 8
@@ -97,11 +101,24 @@ func Refresh(ctx context.Context, opts RefreshOptions) (RefreshResult, error) {
 	}
 	res := RefreshResult{Listed: len(ids)}
 
-	discovered := probeQueues(ctx, opts.HTTPClient, ids, opts.Concurrency, &res)
+	knownPath := KnownTextPath()
+	known := loadKnownText(knownPath)
+	discovered := probeQueues(ctx, opts.HTTPClient, ids, opts.Concurrency, &res, known)
 
 	if res.OK > 0 {
 		Models = mergeRegistry(discovered, ids, Models)
 	}
+
+	// Persist the confirmed-text set. Entries absent from this catalog round
+	// are pruned — same retirement rule as mergeRegistry — so the file never
+	// grows stale retirees.
+	kept := make([]string, 0, len(discovered))
+	for _, id := range ids {
+		if _, ok := discovered[id]; ok || known[id] {
+			kept = append(kept, id)
+		}
+	}
+	saveKnownText(knownPath, kept)
 
 	res.Duration = time.Since(t0)
 	if res.OK == 0 {
@@ -177,7 +194,9 @@ func fetchCatalog(ctx context.Context, hc *http.Client) ([]string, error) {
 
 // probeQueues fans out to the queue endpoint with bounded concurrency.
 // Returns the populated map (only successful models — no functionId entries).
-func probeQueues(ctx context.Context, hc *http.Client, ids []string, concurrency int, res *RefreshResult) map[string]ModelInfo {
+// known carries the persisted known-text cache: an id present there skips the
+// /playground fetch entirely and is recorded as kept.
+func probeQueues(ctx context.Context, hc *http.Client, ids []string, concurrency int, res *RefreshResult, known map[string]bool) map[string]ModelInfo {
 	out := make(map[string]ModelInfo, len(ids))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -207,26 +226,33 @@ func probeQueues(ctx context.Context, hc *http.Client, ids []string, concurrency
 			}
 			mu.Unlock()
 
-			// Capability + context length probe are best-effort and run after
-			// the queue check so a retired model is dropped before we waste a
-			// page fetch.
-			caps, ctxLen, isText := probeCapabilitiesAndContext(ctx, hc, id)
+			// Playground existence probe is best-effort and runs after the
+			// queue check so a retired model is dropped before we waste a
+			// page fetch. A cached id skips it entirely.
+			exists := known[id]
+			if !exists {
+				exists = probePlayground(ctx, hc, id)
+			} else {
+				mu.Lock()
+				res.Cached++
+				mu.Unlock()
+			}
 
-			mu.Lock()
-			if !isText {
-				// Page shows no full modelCapability object — not a chat/text
-				// playground (embedding stub, ASR, retrieval…). Keep it out.
+			if !exists {
+				// No /playground page — not a text model (embedding, ASR,
+				// retrieval…). Keep it out.
+				mu.Lock()
 				res.Skipped++
 				mu.Unlock()
 				return
 			}
+
+			mu.Lock()
 			res.WithCaps++
 			out[id] = ModelInfo{
-				Slug:          slugOf(id),
-				Namespace:     Namespace,
-				FunctionID:    fnID,
-				Capability:    caps,
-				ContextLength: ctxLen,
+				Slug:       slugOf(id),
+				Namespace:  Namespace,
+				FunctionID: fnID,
 			}
 			res.OK++
 			mu.Unlock()
@@ -290,77 +316,117 @@ func slugOf(id string) string {
 	return slug
 }
 
-// capabilityJSONRE captures the embedded JSON literal
-// `{\"functionCalling\":<bool>,\"structuredOutput\":<bool>,\"reasoning\":<bool>}`
-// that Next.js inlines into the playground HTML for the Capabilities sidebar.
-// The JSON is escaped because it lives inside a <script> tag, so we match
-// the escaped quotes literally.
-var capabilityJSONRE = regexp.MustCompile(`\\"functionCalling\\":(true|false),\\"structuredOutput\\":(true|false),\\"reasoning\\":(true|false)`)
+// notFoundMarker is the Next.js error digest streamed into the RSC payload
+// when a /playground route does not exist. The HTTP status is still 200 (the
+// shell flushes before the route resolves), so the body is the only reliable
+// existence signal.
+var notFoundMarker = []byte("NEXT_HTTP_ERROR_FALLBACK;404")
 
-// contextLengthRE captures `\\"contextLength\\":<int>` from the same
-// specifications JSON literal. The value is in tokens (e.g. 1048576 for
-// minimax-m3, 32768 for gemma-3n-e4b-it). 0 when absent.
-var contextLengthRE = regexp.MustCompile(`\\"contextLength\\":([0-9]+)`)
-
-// outputModalities proved unreliable in practice (arrays missing or empty on
-// pages that are clearly not chat, e.g. baai/bge-m3 renders an empty []). The
-// keep/drop signal is now the modelCapability object itself: see pageIsText.
-
-// pageIsText reports whether the page carries a FULL modelCapability object
-// (`{\"functionCalling\":…,\"structuredOutput\":…,\"reasoning\":…}`). Chat/text
-// playgrounds always inline all three flags; embedding/ASR/retrieval pages omit
-// the object entirely or render only the one-field stub
-// `{\"functionCalling\":false}` (verified live 2026-08-23: minimax-m3 and
-// nemotron-nano-12b-v2-vl carry all three; bge-m3 renders the stub;
-// llama-3_2-nv-embedqa and riva-asr have none).
-func pageIsText(body []byte) bool {
-	return capabilityJSONRE.FindSubmatch(body) != nil
+// playgroundExists reports whether a fetched /playground body is a real
+// playground page rather than the soft-404 shell.
+func playgroundExists(body []byte) bool {
+	return !bytes.Contains(body, notFoundMarker)
 }
 
-// probeCapabilitiesAndContext fetches the playground HTML once and extracts
-// both the capability flags and the contextLength. isText=false means the page
-// shows no full modelCapability object (see pageIsText) — such models must not
-// enter the discovered map. An unreachable/malformed page also yields
-// isText=false ("no proof of text"): hardcoded entries survive via the
-// mergeRegistry carry-over; brand-new ones just wait for the next refresh.
-// ctxLen stays 0 when the page lacks the specifications literal.
-func probeCapabilitiesAndContext(ctx context.Context, hc *http.Client, id string) (caps *ModelCapability, ctxLen int, isText bool) {
+// probePlayground reports whether https://build.nvidia.com/<id>/playground
+// exists. false means "no proof of text": non-text model or transient fetch
+// failure — such models must not enter the discovered map. Hardcoded entries
+// survive via the mergeRegistry carry-over; brand-new ones just wait for the
+// next refresh.
+//
+// The site rate-limits bursts of page fetches (observed 2026-08-24: throttled
+// requests come back as dropped connections or as a soft-404 shell), so a miss
+// is retried once after a short backoff before the model is dropped.
+func probePlayground(ctx context.Context, hc *http.Client, id string) bool {
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(750 * time.Millisecond):
+			case <-ctx.Done():
+				return false
+			}
+		}
+		if fetchPlaygroundExists(ctx, hc, id) {
+			return true
+		}
+	}
+	return false
+}
+
+func fetchPlaygroundExists(ctx context.Context, hc *http.Client, id string) bool {
 	pub, slug, ok := splitPublisherSlug(id)
 	if !ok {
-		return nil, 0, false
+		return false
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf(playgroundURLFmt, pub, slug), nil)
 	if err != nil {
-		return nil, 0, false
+		return false
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, 0, false
+		return false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, 0, false
+		return false
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, 0, false
+		return false
 	}
+	return playgroundExists(body)
+}
 
-	m := capabilityJSONRE.FindSubmatch(body)
-	if m == nil {
-		return nil, 0, false
+// KnownTextPath returns ~/.nvpi/known_text_models.json ("" when HOME is unset)
+// — the persisted set of ids whose /playground page has been confirmed to
+// exist. Exposed so serve's startup log can point at it.
+func KnownTextPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
 	}
-	capsOut := &ModelCapability{
-		ToolCalling:      string(m[1]) == "true",
-		StructuredOutput: string(m[2]) == "true",
-		Reasoning:        string(m[3]) == "true",
-	}
+	return filepath.Join(home, ".nvpi", "known_text_models.json")
+}
 
-	ctxLen = 0
-	if m := contextLengthRE.FindSubmatch(body); m != nil {
-		// ponytail: parseInt is one line; strconv.Atoi + err check is two.
-		// A bad regex match (impossible: `[0-9]+`) would still surface as 0.
-		ctxLen, _ = strconv.Atoi(string(m[1]))
+// loadKnownText returns the cached id set; missing/corrupt file → nil (probe
+// everything). No TTL by design: a retired model leaves via the catalog
+// (absent from the catalog list is dropped), so a stale entry is harmless.
+func loadKnownText(path string) map[string]bool {
+	if path == "" {
+		return nil
 	}
-	return capsOut, ctxLen, true
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var ids []string
+	if json.Unmarshal(data, &ids) != nil {
+		return nil
+	}
+	m := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		m[id] = true
+	}
+	return m
+}
+
+// saveKnownText persists the id set (atomic tmp+rename so a crash cannot leave
+// a half file). Errors are non-fatal: worst case next refresh probes again.
+func saveKnownText(path string, ids []string) {
+	if path == "" || len(ids) == 0 {
+		return
+	}
+	sort.Strings(ids)
+	data, err := json.Marshal(ids)
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, data, 0o644) != nil {
+		return
+	}
+	_ = os.Rename(tmp, path)
 }

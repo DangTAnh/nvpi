@@ -1,23 +1,22 @@
 // Command probehard is a one-off probe of the hardcoded registry: for every
-// models.Models entry, fetch the playground page and check the pageIsText
-// signal (full modelCapability object). Output lines "id|status|isText" —
-// isText=false marks a retired / non-chat page to prune from registry.go.
+// models.Models entry, fetch the /playground page and check it exists (the
+// Next.js soft-404 digest NEXT_HTTP_ERROR_FALLBACK;404 means no playground).
+// Output lines "id|status|exists" — exists=false marks a retired / non-text
+// model to prune from registry.go.
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"sort"
 	"sync"
 	"time"
 
 	"glm52-nvidia/internal/models"
 )
-
-var capRE = regexp.MustCompile(`\\"functionCalling\\":(true|false),\\"structuredOutput\\":(true|false),\\"reasoning\\":(true|false)`)
 
 func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
@@ -43,8 +42,10 @@ func main() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			info := models.Models[id]
-			url := fmt.Sprintf("https://build.nvidia.com/%s/%s", info.Namespace, info.Slug)
+			// id is "<publisher>/<slug>" — the playground path mirrors it
+			// verbatim (NOT info.Namespace: that's the NVCF function namespace,
+			// not the site org).
+			url := fmt.Sprintf("https://build.nvidia.com/%s/playground", id)
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 			if err != nil {
 				rows[i] = row{id, "REQ_ERR", false}
@@ -57,12 +58,12 @@ func main() {
 			}
 			defer resp.Body.Close()
 			status := resp.StatusCode
-			text := false
+			exists := false
 			if status == 200 {
 				body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-				text = capRE.Match(body)
+				exists = !bytes.Contains(body, []byte("NEXT_HTTP_ERROR_FALLBACK;404"))
 			}
-			rows[i] = row{id, fmt.Sprint(status), text}
+			rows[i] = row{id, fmt.Sprint(status), exists}
 		}(i, id)
 	}
 	wg.Wait()

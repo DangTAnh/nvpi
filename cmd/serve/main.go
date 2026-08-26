@@ -76,7 +76,7 @@ func main() {
 	selectBudget := flag.Duration("captcha-select-budget", 4*time.Minute, "wall-clock budget for playground auto-selection (-captcha-playground empty); dead pages cost up to 30s each, so a fully-dead window plus rescue sweep needs minutes; past it the decision uses whatever was already measured")
 	defaultModel := flag.String("default-model", "", "rewrite unknown requested models (e.g. Claude Code's builtin claude-*) to this registered model instead of rejecting with 400; empty = strict")
 	refreshRegistry := flag.Bool("refresh-registry", true, "re-fetch the model registry from upstream catalog at startup (falls back to hardcoded list on failure)")
-	registryTimeout := flag.Duration("registry-timeout", 30*time.Second, "timeout for the startup registry refresh")
+	registryTimeout := flag.Duration("registry-timeout", 5*time.Minute, "ceiling for the startup registry refresh (returns early when probes finish)")
 	flag.Parse()
 
 	if !*auto && *captchaFlag == "" {
@@ -133,8 +133,8 @@ func main() {
 		if err != nil {
 			log.Printf("models: refresh failed (%v) — keeping hardcoded registry (%d models)", err, len(models.Models))
 		} else {
-			log.Printf("models: refreshed %d/%d (probed=%d skipped=%d withCaps=%d) in %s",
-				res.OK, res.Listed, res.Probed, res.Skipped, res.WithCaps, res.Duration.Round(time.Millisecond))
+			log.Printf("models: refreshed %d/%d (probed=%d cached=%d skipped=%d textModels=%d) in %s",
+				res.OK, res.Listed, res.Probed, res.Cached, res.Skipped, res.WithCaps, res.Duration.Round(time.Millisecond))
 		}
 	}
 

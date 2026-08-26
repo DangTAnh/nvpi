@@ -5,10 +5,8 @@
 
 Gateway local biến **NVIDIA Playground** thành API chuẩn OpenAI/Claude/Responses — **không cần API key**, không tốn phí, thiết kế xoay quanh **Claude Code** làm client chính. hCaptcha one-shot được mint tự động bằng headless Chrome pool.
 
-> Model mặc định: `minimaxai/minimax-m3` (1M context). `z-ai/glm-5.2` đã retire phía NVIDIA.
->
-> **Ràng buộc thiết kế** (không thương lượng): không dùng `nvapi-key` (rate limit thấp), không dùng dịch vụ captcha-solver trả phí — mọi thứ 100% miễn phí. Chi tiết nghiên cứu: [docs/captcha-research.md](docs/captcha-research.md).
-
+> Model mặc định: `minimaxai/minimax-m3` (1M context).
+> 
 ## Kiến trúc
 
 ```
@@ -102,7 +100,7 @@ docker compose up --build -d     # -auto -addr :8080, shm 2GB cho Chrome
 | `cmd/hangbench` | Bench độ trễ/khung treo pool |
 | `cmd/streambench` | Bench SSE coalescing |
 | `cmd/getsitkey` | In sitekey hCaptcha bằng cách nghe network traffic |
-| `cmd/probehard` | Probe registry hardcode theo tín hiệu `modelCapability` — liệt kê model retire để prune |
+| `cmd/probehard` | Probe registry hardcode theo sự tồn tại của trang `/playground` — liệt kê model retire để prune |
 | `cmd/cacheprobe`, `cmd/captchaopt` | So chiến lược extract/probe |
 
 ## License
