@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# nvpi — build (if needed) and run the serve binary.
+#
+# Behavior:
+#   - If nvpi-serve.exe is newer than every source file (incl. this script's
+#     invocation timestamp), run it directly.
+#   - Otherwise rebuild then run.
+#   - Pass-through CLI args to the serve binary.
+#
+# Why a shell wrapper:
+#   The user typed `nvpi`; PowerShell's PATH already points here, so this is
+#   the entry point. Keeping the rebuild logic in version control means
+#   source-only changes auto-take-effect without a manual `go build`.
+
+set -e
+
+cd "$(dirname "$0")"
+
+EXE=nvpi-serve.exe
+
+# Source set: anything under cmd/, internal/, plus this wrapper itself plus
+# the top-level client/types files. We rebuild if any source is newer than
+# the binary, OR if the binary is missing.
+need_build=0
+if [ ! -x "$EXE" ]; then
+    need_build=1
+else
+    # -newer checks modification time. Loop once: find mtime of newest source
+    # file under the directories we care about, compare against the binary.
+    while IFS= read -r -d '' src; do
+        if [ "$src" -nt "$EXE" ]; then
+            need_build=1
+            break
+        fi
+    done < <(find cmd internal types.go client.go nvpi -type f \( -name '*.go' -o -path ./nvpi \) -print0 2>/dev/null)
+fi
+
+if [ "$need_build" = "1" ]; then
+    echo "build: $EXE (sources updated)" >&2
+    go build -o "$EXE" ./cmd/serve
+fi
+
+exec ./"$EXE" "$@"
