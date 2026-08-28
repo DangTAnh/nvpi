@@ -49,6 +49,9 @@ func coalesceSSEEvents(src io.Reader, window time.Duration, emit func(line strin
 		timer     *time.Timer
 		timerC    <-chan time.Time
 		firstSent bool
+		sawFinish bool
+		sawChoice bool
+		sawDone   bool
 	)
 	stopTimer := func() {
 		if timer != nil {
@@ -76,6 +79,27 @@ func coalesceSSEEvents(src io.Reader, window time.Duration, emit func(line strin
 		timerC = timer.C
 	}
 
+	// injectFinishReason emits a synthetic chunk carrying finish_reason="stop"
+	// so the downstream SDK translator can close any open Anthropic
+	// content_block, send message_delta + message_stop, and the host client
+	// (Claude Code) stops treating the turn as still-streaming. Used when
+	// upstream closes the connection mid-turn — common when the client
+	// hits Ctrl+C during a text-only delta burst on kimi k3 / moonshot.
+	injectFinishReason := func() error {
+		if !sawChoice || sawFinish || sawDone {
+			return nil
+		}
+		synthetic := `{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`
+		sawFinish = true
+		if err := flushPending(); err != nil {
+			return err
+		}
+		if err := emit("data: " + synthetic); err != nil {
+			return err
+		}
+		return nil
+	}
+
 	for {
 		select {
 		case <-timerC:
@@ -85,12 +109,14 @@ func coalesceSSEEvents(src io.Reader, window time.Duration, emit func(line strin
 
 		case rr := <-ch:
 			if rr.err != nil && rr.line == "" {
-				ferr := flushPending()
-				if rr.err == io.EOF {
-					return ferr
+				if err := flushPending(); err != nil {
+					return err
 				}
-				if ferr != nil {
-					return ferr
+				if rr.err == io.EOF {
+					if err := injectFinishReason(); err != nil {
+						return err
+					}
+					return nil
 				}
 				return rr.err
 			}
@@ -101,6 +127,7 @@ func coalesceSSEEvents(src io.Reader, window time.Duration, emit func(line strin
 				// ignore keep-alives / comments
 
 			case line == "data: [DONE]":
+				sawDone = true
 				if err := flushPending(); err != nil {
 					return err
 				}
@@ -119,6 +146,19 @@ func coalesceSSEEvents(src io.Reader, window time.Duration, emit func(line strin
 						return err
 					}
 					break
+				}
+
+				if choices := chunk["choices"]; choices != nil {
+					sawChoice = true
+					if arr, ok := choices.([]any); ok && len(arr) > 0 {
+						if c0, ok := arr[0].(map[string]any); ok {
+							if fr, ok := c0["finish_reason"]; ok {
+								if s, ok := fr.(string); ok && s != "" {
+									sawFinish = true
+								}
+							}
+						}
+					}
 				}
 
 				content, ok := mergeableContent(chunk)
@@ -165,12 +205,14 @@ func coalesceSSEEvents(src io.Reader, window time.Duration, emit func(line strin
 			}
 
 			if rr.err != nil {
-				ferr := flushPending()
-				if rr.err == io.EOF {
-					return ferr
+				if err := flushPending(); err != nil {
+					return err
 				}
-				if ferr != nil {
-					return ferr
+				if rr.err == io.EOF {
+					if err := injectFinishReason(); err != nil {
+						return err
+					}
+					return nil
 				}
 				return rr.err
 			}

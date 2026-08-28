@@ -43,6 +43,12 @@ type Options struct {
 	// registered model before Lookup (e.g. Claude Code's builtin claude-*
 	// names). Empty = strict 400 on unknown models (current behavior).
 	DefaultModel string
+
+	// DebugSseDir, when non-empty, enables raw upstream SSE + post-SDK
+	// Anthropic payload capture for each streaming turn. Files are named
+	// <unixnano>-<model>.log so multiple parallel turns sort
+	// chronologically. Empty = disabled.
+	DebugSseDir string
 }
 
 // Executor implements coreauth.ProviderExecutor for NVIDIA playground predict.
@@ -60,6 +66,8 @@ type Executor struct {
 	beforeInflightWait func()
 	beforeSend         func()
 
+	debugSseDir string
+
 	mu          sync.Mutex
 	flagCaptcha string
 }
@@ -76,6 +84,7 @@ func NewExecutor(opts Options) *Executor {
 		predictURL:   opts.PredictURL,
 		defaultModel: opts.DefaultModel,
 		flagCaptcha:  opts.FlagCaptcha,
+		debugSseDir:  opts.DebugSseDir,
 	}
 	if e.httpClient == nil {
 		e.httpClient = http.DefaultClient
@@ -161,9 +170,15 @@ func (e *Executor) ExecuteStream(ctx context.Context, _ *coreauth.Auth, req clip
 		var param any
 		guard := &emptyGuard{}
 
+		reqID := extractRequestID(opts.OriginalRequest)
+		debug := startSseDebug(e.debugSseDir, req.Model, reqID)
+		defer debug.stop()
+
 		emitLine := func(line string) error {
+			debug.writeRaw(line)
 			chunks := sdktranslator.TranslateStream(ctx, from, to, req.Model, opts.OriginalRequest, body, []byte(line), &param)
 			for _, chunk := range chunks {
+				debug.writeAnthropic(chunk)
 				guard.observe(chunk)
 				if guard.shouldEmitPlaceholder(chunk) {
 					// SDK is closing the stream without ever opening a
@@ -172,6 +187,7 @@ func (e *Executor) ExecuteStream(ctx context.Context, _ *coreauth.Auth, req clip
 					// text block so the turn is visible and the next
 					// request's history is continuous.
 					for _, placeholder := range emptyTextBlockChunks() {
+						debug.writeAnthropic(placeholder)
 						select {
 						case out <- clipexec.StreamChunk{Payload: placeholder}:
 						case <-ctx.Done():

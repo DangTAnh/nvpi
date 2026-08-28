@@ -75,6 +75,7 @@ func main() {
 	captchaPlayground := flag.String("captcha-playground", "", "playground URL pinned for captcha minting; empty = auto-select the fastest alive playground at startup (sliding-window bench, memory in ~/.nvpi/playground-state.json)")
 	selectBudget := flag.Duration("captcha-select-budget", 4*time.Minute, "wall-clock budget for playground auto-selection (-captcha-playground empty); dead pages cost up to 30s each, so a fully-dead window plus rescue sweep needs minutes; past it the decision uses whatever was already measured")
 	defaultModel := flag.String("default-model", "", "rewrite unknown requested models (e.g. Claude Code's builtin claude-*) to this registered model instead of rejecting with 400; empty = strict")
+	debugSseDir := flag.String("debug-sse-dir", "", "if non-empty, capture raw upstream SSE + post-SDK Anthropic payloads to <dir>/{raw,anth}-<unixnano>-<model>.log for debugging; empty = disabled")
 	refreshRegistry := flag.Bool("refresh-registry", true, "re-fetch the model registry from upstream catalog at startup (falls back to hardcoded list on failure)")
 	registryTimeout := flag.Duration("registry-timeout", 5*time.Minute, "ceiling for the startup registry refresh (returns early when probes finish)")
 	flag.Parse()
@@ -226,6 +227,7 @@ func main() {
 		InflightWait: *inflightWait,
 		CaptchaWait:  *captchaWait,
 		DefaultModel: *defaultModel,
+		DebugSseDir:  *debugSseDir,
 		HTTPClient:   &http.Client{Timeout: 0, Transport: transport},
 		Pool:         pool,
 	})
