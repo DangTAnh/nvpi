@@ -135,6 +135,7 @@ func (e *Executor) Execute(ctx context.Context, _ *coreauth.Auth, req clipexec.R
 	from := sdktranslator.FormatOpenAI
 	to := clipexec.ResponseFormatOrSource(opts)
 	out := sdktranslator.TranslateNonStream(ctx, from, to, req.Model, opts.OriginalRequest, body, raw, nil)
+	out = patchEmptyAnthropicTurn(out)
 	return clipexec.Response{Payload: out, Headers: upResp.Header.Clone()}, nil
 }
 
@@ -158,10 +159,26 @@ func (e *Executor) ExecuteStream(ctx context.Context, _ *coreauth.Auth, req clip
 		from := sdktranslator.FormatOpenAI
 		to := clipexec.ResponseFormatOrSource(opts)
 		var param any
+		guard := &emptyGuard{}
 
 		emitLine := func(line string) error {
 			chunks := sdktranslator.TranslateStream(ctx, from, to, req.Model, opts.OriginalRequest, body, []byte(line), &param)
 			for _, chunk := range chunks {
+				guard.observe(chunk)
+				if guard.shouldEmitPlaceholder(chunk) {
+					// SDK is closing the stream without ever opening a
+					// content block; the host client would render "(no
+					// content)" for this turn. Inject a single "."
+					// text block so the turn is visible and the next
+					// request's history is continuous.
+					for _, placeholder := range emptyTextBlockChunks() {
+						select {
+						case out <- clipexec.StreamChunk{Payload: placeholder}:
+						case <-ctx.Done():
+							return ctx.Err()
+						}
+					}
+				}
 				select {
 				case out <- clipexec.StreamChunk{Payload: chunk}:
 				case <-ctx.Done():
