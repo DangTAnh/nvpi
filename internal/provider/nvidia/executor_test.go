@@ -245,6 +245,67 @@ func TestExecute_defaultModelRewritesUnknownModel(t *testing.T) {
 	}
 }
 
+// TestExecute_defaultModelRewritesBeforeNormalize is the regression guard
+// for the order-of-operations bug: preparePayload used to translate →
+// normalize → lookup → maybe-rewrite. Reasoning normalization reads the
+// body's "model" field to pick the profile, so a post-translate rewrite left
+// MiniMax-targeted requests carrying a generic reasoning_effort kwarg that
+// MiniMax's backend ignores — the upstream model then ran without any
+// scaffold and hallucinated to compensate. The fix moves Lookup + possible
+// rewrite ahead of Normalize so the profile matches the actual upstream.
+func TestExecute_defaultModelRewritesBeforeNormalize(t *testing.T) {
+	var gotBody []byte
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"1","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer up.Close()
+	e := NewExecutor(Options{
+		DefaultModel: "minimaxai/minimax-m3",
+		FlagCaptcha:  "test-token",
+		HTTPClient:   up.Client(),
+		PredictURL:   func(models.ModelInfo) string { return up.URL },
+	})
+
+	// Claude Code uses Anthropic's thinking shape. Without the order fix,
+	// the body reaching upstream would carry reasoning_effort (a generic
+	// default for unknown models) instead of MiniMax's thinking_mode kwarg.
+	_, err := e.Execute(context.Background(), nil, clipexec.Request{
+		Model: "claude-sonnet-4-20250514",
+		Payload: []byte(`{
+			"model":"claude-sonnet-4-20250514",
+			"max_tokens":64,
+			"messages":[{"role":"user","content":"hi"}],
+			"thinking":{"type":"enabled","budget_tokens":4096}
+		}`),
+	}, clipexec.Options{SourceFormat: sdktranslator.FormatClaude})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(gotBody, &body); err != nil {
+		t.Fatalf("upstream body not json: %v body=%s", err, gotBody)
+	}
+	if body["model"] != "minimaxai/minimax-m3" {
+		t.Fatalf("upstream model=%v want minimaxai/minimax-m3", body["model"])
+	}
+	kw, _ := body["chat_template_kwargs"].(map[string]any)
+	if kw == nil {
+		t.Fatalf("chat_template_kwargs missing from upstream body: %s", gotBody)
+	}
+	// MiniMax profile MUST use thinking_mode, not reasoning_effort. The
+	// pre-fix bug shipped reasoning_effort here for an Anthropic name even
+	// though the upstream was MiniMax.
+	if _, hasEffort := kw["reasoning_effort"]; hasEffort {
+		t.Fatalf("MiniMax upstream received reasoning_effort — order-of-ops bug regressed: kw=%#v", kw)
+	}
+	if _, hasMode := kw["thinking_mode"]; !hasMode {
+		t.Fatalf("MiniMax upstream missing thinking_mode kwarg: kw=%#v", kw)
+	}
+}
+
 func TestAcquireInflight(t *testing.T) {
 	e := NewExecutor(Options{MaxInflight: 1, InflightWait: 0})
 	rel1, err := e.acquireInflight(context.Background())

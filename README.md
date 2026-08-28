@@ -82,7 +82,7 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 | `-captcha-wait` | `30s` | Chờ token khi pool cạn rồi mới 503 |
 | `-captcha-playground` | rỗng = auto | Rỗng: bench cửa sổ trượt 5 trang sống mỗi lần start (`-captcha-select-budget` 4m), champion lưu `~/.nvpi/playground-state.json`; NVIDIA retire model → tự đổi trang mint, không hardcode. Gắn URL để ghim cứng. Bỏ qua khi `-captcha-harness` bật (mặc định) — mint không phụ thuộc trang model sống |
 | `-captcha-harness` | `true` | Mint trên **trang harness tối giản** thay vì trang Next.js đầy đủ: cùng origin build.nvidia.com, sitekey scrape bằng HTTP thuần lúc start — RAM/chrome ~50MB thay vì ~150–350MB, warm ~2s thay vì 6–10s, mint batch 6 token ~2s. Scrape fail → tự fallback về đường cũ (kèm playground selection) |
-| `-default-model` | rỗng | Rewrite model lạ (VD `claude-*`) về model đăng ký |
+| `-default-model` | rỗng | Rewrite model lạ (VD `claude-*`) về model đăng ký. Rewrite xảy ra **trước** khi normalize (reaso­ning kwargs build đúng profile model đích) và đều được log `nvidia: default-model rewrite ...` — không còn rewrite âm thầm |
 | `-refresh-registry` | `true` | Refresh catalog NVIDIA lúc start (merge, không thay thế — probe fail tạm thời không làm mất model) |
 | `-chrome-proxy` | `CHROME_PROXY` | Proxy cho cả Chrome lẫn upstream (vd `socks5://host:port`) |
 

@@ -36,6 +36,27 @@ func translateToChat(source sdktranslator.Format, model string, request []byte, 
 		}
 	case sdktranslator.FormatClaude:
 		copyRawFields(chatBody, sourceBody, "temperature", "top_p")
+		// Anthropic-only scalars → OpenAI equivalents. The SDK translator
+		// focuses on message/tool shapes and leaves these unmapped; without
+		// them, callers like Claude Code that pass top_k=5 or stop_sequences
+		// silently lose them in flight, and the upstream model picks its own
+		// defaults — which can drift output in ways the caller perceives as
+		// hallucination.
+		if v, ok := sourceBody["top_k"]; ok {
+			chatBody["top_k"] = v
+		}
+		if v, ok := sourceBody["stop_sequences"]; ok {
+			chatBody["stop"] = v
+		}
+		if md, ok := sourceBody["metadata"]; ok {
+			var meta struct {
+				UserID string `json:"user_id"`
+			}
+			if json.Unmarshal(md, &meta) == nil && meta.UserID != "" {
+				userJSON, _ := json.Marshal(meta.UserID)
+				chatBody["user"] = userJSON
+			}
+		}
 	}
 
 	return json.Marshal(chatBody)

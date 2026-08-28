@@ -17,9 +17,12 @@ func TestNormalizeRequestBody(t *testing.T) {
 	if err := json.Unmarshal(out, &raw); err != nil {
 		t.Fatal(err)
 	}
-	opts := raw["stream_options"].(map[string]any)
-	if opts["continuous_usage_stats"] != false {
-		t.Fatalf("got %#v", opts["continuous_usage_stats"])
+	// NormalizeRequestBody no longer touches stream_options — that lives in
+	// forceStreamFlag (the single canonical place). Asserting its absence here
+	// is the regression guard: if someone re-merges the old stream_options
+	// block into NormalizeRequestBody, this test breaks.
+	if _, ok := raw["stream_options"]; ok {
+		t.Fatalf("NormalizeRequestBody must not inject stream_options (that's forceStreamFlag's job); got %#v", raw["stream_options"])
 	}
 	if _, ok := raw["chat_template_kwargs"]; ok {
 		t.Fatalf("thinking kwargs should not be injected without a supported model: %#v", raw)
@@ -153,6 +156,10 @@ func TestNormalizeRequestBodyMapsReasoningEffortByModel(t *testing.T) {
 	}{
 		{name: "minimax medium uses adaptive thinking", model: "minimaxai/minimax-m3", in: "medium", key: "thinking_mode", want: "adaptive"},
 		{name: "minimax xhigh enables thinking", model: "minimaxai/minimax-m3", in: "xhigh", key: "thinking_mode", want: "enabled"},
+		{name: "nemotron ultra medium enables medium_effort", model: "nvidia/nemotron-3-ultra-550b-a55b", in: "medium", key: "medium_effort", want: true},
+		{name: "nemotron ultra none disables thinking", model: "nvidia/nemotron-3-ultra-550b-a55b", in: "none", key: "enable_thinking", want: false},
+		{name: "nemotron super low enables low_effort", model: "nvidia/nemotron-3-super-120b-a12b", in: "low", key: "low_effort", want: true},
+		{name: "nemotron super none disables thinking", model: "nvidia/nemotron-3-super-120b-a12b", in: "none", key: "enable_thinking", want: false},
 	}
 
 	for _, tc := range cases {
@@ -193,6 +200,79 @@ func TestNormalizeRequestBodyDoesNotInjectThinkingIntoUnsupportedModel(t *testin
 	}
 	if _, ok := raw["chat_template_kwargs"]; ok {
 		t.Fatalf("unsupported model received thinking kwargs: %s", out)
+	}
+}
+
+// TestNormalizeNemotronUltraDefaultsEnableThinking reproduces the exact bug:
+// bare OpenAI-shaped requests to the Nemotron-3 hybrid MoE models were
+// leaving the upstream predict endpoint without the `chat_template_kwargs`
+// block the build.nvidia.com playground's server-side template always emits.
+// Upstream responds 400 in that case; the fix is to inject
+// `chat_template_kwargs: {enable_thinking: true}` whenever the caller did not
+// pick a tier (matching the playground's `reasoning_effort || "high"` branch).
+func TestNormalizeNemotronUltraDefaultsEnableThinking(t *testing.T) {
+	cases := []struct {
+		name      string
+		body      string
+		wantKwargs map[string]any
+	}{
+		{
+			name: "ultra bare request defaults to enable_thinking true",
+			body: `{"model":"nvidia/nemotron-3-ultra-550b-a55b","messages":[{"role":"user","content":"hi"}],"stream":false}`,
+			wantKwargs: map[string]any{"enable_thinking": true},
+		},
+		{
+			name: "ultra explicit high effort keeps enable_thinking true with no medium flag",
+			body: `{"model":"nvidia/nemotron-3-ultra-550b-a55b","reasoning_effort":"high","stream":false}`,
+			wantKwargs: map[string]any{"enable_thinking": true},
+		},
+		{
+			name: "ultra max effort collapses to enable_thinking true",
+			body: `{"model":"nvidia/nemotron-3-ultra-550b-a55b","reasoning_effort":"max","stream":false}`,
+			wantKwargs: map[string]any{"enable_thinking": true},
+		},
+		{
+			name: "super bare request defaults to enable_thinking true",
+			body: `{"model":"nvidia/nemotron-3-super-120b-a12b","messages":[{"role":"user","content":"hi"}],"stream":false}`,
+			wantKwargs: map[string]any{"enable_thinking": true},
+		},
+		{
+			name: "super low effort enables low_effort marker",
+			body: `{"model":"nvidia/nemotron-3-super-120b-a12b","reasoning_effort":"low","stream":false}`,
+			wantKwargs: map[string]any{"enable_thinking": true, "low_effort": true},
+		},
+		{
+			name: "explicit enable_thinking false wins over effort",
+			body: `{"model":"nvidia/nemotron-3-ultra-550b-a55b","reasoning_effort":"medium","enable_thinking":false,"stream":false}`,
+			wantKwargs: map[string]any{"enable_thinking": false},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := NormalizeRequestBody([]byte(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var raw map[string]any
+			if err := json.Unmarshal(out, &raw); err != nil {
+				t.Fatal(err)
+			}
+			kw, ok := raw["chat_template_kwargs"].(map[string]any)
+			if !ok {
+				t.Fatalf("chat_template_kwargs missing from %s", out)
+			}
+			if len(kw) != len(tc.wantKwargs) {
+				t.Fatalf("kwargs=%#v want %#v (body=%s)", kw, tc.wantKwargs, out)
+			}
+			for k, v := range tc.wantKwargs {
+				if kw[k] != v {
+					t.Fatalf("kw[%q]=%#v want %#v (full=%#v)", k, kw[k], v, kw)
+				}
+			}
+			if _, ok := raw["reasoning_effort"]; ok {
+				t.Fatalf("reasoning_effort alias was not consumed: %s", out)
+			}
+		})
 	}
 }
 

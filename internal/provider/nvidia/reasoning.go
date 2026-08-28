@@ -13,6 +13,18 @@ const (
 	reasoningToggle
 	reasoningEffortAndToggle
 	reasoningMiniMax
+	// reasoningNemotronUltra / reasoningNemotronSuper reproduce the chat_template_kwargs
+	// build that the build.nvidia.com playground's server-side template emits for the
+	// Nemotron-3 hybrid Mamba/Transformer MoE models. The OpenAPI doc inlines a
+	// `reasoning_effort` enum (e.g. ["none","medium","high"] for Ultra), but the actual
+	// backend NIM accepts `enable_thinking` + optional effort-flag markers
+	// (`medium_effort` for Ultra, `low_effort` for Super). Web playground translates
+	// request.reasoning_effort into the right `chat_template_kwargs` shape; this
+	// gateway must do the same, otherwise requests omit `chat_template_kwargs` and the
+	// upstream returns 400. Without a profile, `normalizeThinking` would silently
+	// strip top-level reasoning fields and emit no kwargs.
+	reasoningNemotronUltra
+	reasoningNemotronSuper
 )
 
 type reasoningProfile struct {
@@ -29,7 +41,9 @@ type reasoningProfile struct {
 // to defaultReasoningProfile (built from defaultReasoningLevels + the
 // registry's Capability.Reasoning flag).
 var reasoningProfiles = map[string]reasoningProfile{
-	"minimaxai/minimax-m3": {kind: reasoningMiniMax},
+	"minimaxai/minimax-m3":              {kind: reasoningMiniMax},
+	"nvidia/nemotron-3-ultra-550b-a55b": {kind: reasoningNemotronUltra},
+	"nvidia/nemotron-3-super-120b-a12b": {kind: reasoningNemotronSuper},
 }
 
 // defaultReasoningLevels is what unknown reasoning-capable models get. Listed
@@ -140,6 +154,55 @@ func normalizeThinking(raw map[string]any) {
 				if enabled {
 					kw["thinking_mode"] = "enabled"
 				}
+			}
+		case reasoningNemotronUltra:
+			// Reproduces the playground template:
+			//   reasoning_effort = request.reasoning_effort || "high";
+			//   if (reasoning_effort === "none")  → {enable_thinking: false}
+			//   if (reasoning_effort === "medium")→ {enable_thinking: true, medium_effort: true}
+			//   else                              → {enable_thinking: true}
+			// When neither effort nor enabled was sent, default to the playground's
+			// "high" branch — bare OpenAI-shaped requests must still emit the
+			// enable_thinking kwarg the backend requires. Explicitly disabled via
+			// enable_thinking: false takes precedence.
+			delete(kw, "enable_thinking")
+			delete(kw, "medium_effort")
+			delete(kw, "reasoning_effort")
+			switch {
+			case hasEnabled && !enabled:
+				kw["enable_thinking"] = false
+			case hasEffort && strings.EqualFold(effort, "none"):
+				kw["enable_thinking"] = false
+			case hasEffort && strings.EqualFold(effort, "medium"):
+				kw["enable_thinking"] = true
+				kw["medium_effort"] = true
+			case hasEffort:
+				kw["enable_thinking"] = true
+			case hasEnabled:
+				kw["enable_thinking"] = enabled
+			default:
+				kw["enable_thinking"] = true
+			}
+		case reasoningNemotronSuper:
+			// Same shape as Ultra but the only flagged effort tier is "low"
+			// (the Super's playground template maps low → enable_thinking + low_effort).
+			delete(kw, "enable_thinking")
+			delete(kw, "low_effort")
+			delete(kw, "reasoning_effort")
+			switch {
+			case hasEnabled && !enabled:
+				kw["enable_thinking"] = false
+			case hasEffort && strings.EqualFold(effort, "none"):
+				kw["enable_thinking"] = false
+			case hasEffort && strings.EqualFold(effort, "low"):
+				kw["enable_thinking"] = true
+				kw["low_effort"] = true
+			case hasEffort:
+				kw["enable_thinking"] = true
+			case hasEnabled:
+				kw["enable_thinking"] = enabled
+			default:
+				kw["enable_thinking"] = true
 			}
 		}
 		if hasClearThinking && (profile.kind == reasoningToggle || profile.kind == reasoningEffortAndToggle) {

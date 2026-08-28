@@ -129,3 +129,52 @@ func TestTranslateToChat_ignoresUnsupportedPlatformFeatures(t *testing.T) {
 		})
 	}
 }
+
+// TestTranslateToChat_CopiesClaudeExtras pins the Anthropic→OpenAI scalar
+// remap that lives outside the SDK translator: top_k, stop_sequences → stop,
+// metadata.user_id → user. Without these, Claude Code's sampling controls and
+// user-id telemetry are silently dropped — and the upstream model picks its
+// own defaults, producing output that drifts in ways the caller perceives as
+// hallucination. Regression guard: if someone refactors translateToChat to
+// rely solely on the SDK translator for Claude, this test breaks.
+func TestTranslateToChat_CopiesClaudeExtras(t *testing.T) {
+	request := []byte(`{
+		"model":"minimaxai/minimax-m3",
+		"max_tokens":64,
+		"messages":[{"role":"user","content":"hi"}],
+		"top_k":5,
+		"stop_sequences":["\n\n","END"],
+		"metadata":{"user_id":"u-42","team":"core"}
+	}`)
+
+	got, err := translateToChat(sdktranslator.FormatClaude, "minimaxai/minimax-m3", request, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(got, &body); err != nil {
+		t.Fatal(err)
+	}
+	if string(body["top_k"]) != "5" {
+		t.Fatalf("top_k missing or wrong: %s", body["top_k"])
+	}
+	if string(body["stop"]) == "" || string(body["stop"]) == "null" {
+		t.Fatalf("stop_sequences → stop missing: %s", body["stop"])
+	}
+	// stop must be an array containing the two sequence strings.
+	var stopList []string
+	if err := json.Unmarshal(body["stop"], &stopList); err != nil {
+		t.Fatalf("stop not an array: %v body=%s", err, body["stop"])
+	}
+	if len(stopList) != 2 || stopList[0] != "\n\n" || stopList[1] != "END" {
+		t.Fatalf("stop=%v want [\"\\n\\n\" \"END\"]", stopList)
+	}
+	if string(body["user"]) != `"u-42"` {
+		t.Fatalf("metadata.user_id → user missing or wrong: %s", body["user"])
+	}
+	// Sanity: temperature/top_p still forwarded (covered by sibling test).
+	if _, ok := body["messages"]; !ok {
+		t.Fatalf("messages missing — SDK translator regression: %s", got)
+	}
+}

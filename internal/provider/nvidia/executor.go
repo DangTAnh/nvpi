@@ -187,54 +187,86 @@ func (e *Executor) preparePayload(req clipexec.Request, opts clipexec.Options, s
 	if from == "" {
 		from = sdktranslator.FormatOpenAI
 	}
-	model := req.Model
-	payload, err := translateToChat(from, model, req.Payload, stream)
+
+	// Step 1: resolve model BEFORE translation. If the caller's model name
+	// isn't in the registry AND -default-model is set, the raw payload's
+	// "model" field is rewritten here so normalizeThinking later picks the
+	// right reasoning profile for the actual upstream target. Doing the
+	// rewrite post-translate would build chat_template_kwargs for the wrong
+	// model — e.g. Claude Code's "claude-sonnet-*" with thinking blocks
+	// would emit a generic reasoning_effort that MiniMax's backend ignores,
+	// leaving the model to hallucinate to fill the missing scaffold.
+	finalModel, info, rawPayload, err := e.resolveModel(req.Model, req.Payload)
+	if err != nil {
+		return nil, models.ModelInfo{}, err
+	}
+
+	// Step 2: translate Anthropic / Responses → canonical Chat shape using
+	// the resolved model name.
+	payload, err := translateToChat(from, finalModel, rawPayload, stream)
 	if err != nil {
 		return nil, models.ModelInfo{}, requestErr(http.StatusBadRequest, "invalid json body")
 	}
 
+	// Step 3: normalizeThinking reads body["model"] to choose a reasoning
+	// profile. finalModel is the authoritative name at this point.
 	body, err := NormalizeRequestBody(payload)
 	if err != nil {
 		return nil, models.ModelInfo{}, requestErr(http.StatusBadRequest, "invalid json body")
 	}
 
-	// Ensure stream flag matches the execution mode after translation.
+	// Step 4: ensure stream flag matches the execution mode and stream_options
+	// are filled with sane defaults (skip-if-set so the caller can override
+	// — e.g. reasoning models that need per-delta usage can pre-set
+	// continuous_usage_stats=true).
 	body, err = forceStreamFlag(body, stream)
 	if err != nil {
 		return nil, models.ModelInfo{}, requestErr(http.StatusBadRequest, "invalid json body")
 	}
-
-	var modelProbe struct {
-		Model string `json:"model"`
-	}
-	_ = json.Unmarshal(body, &modelProbe)
-	lookupModel := modelProbe.Model
-	if lookupModel == "" {
-		lookupModel = model
-	}
-	info, err := models.Lookup(lookupModel)
-	if err != nil && e.defaultModel != "" {
-		var uerr *models.ErrUnknownModel
-		if errors.As(err, &uerr) {
-			// -default-model: rewrite unknown names (Claude Code's builtin
-			// claude-*) to the configured fallback before Lookup. Strictly
-			// opt-in; empty flag keeps the strict 400.
-			if nb, berr := setBodyModel(body, e.defaultModel); berr == nil {
-				body = nb
-				info, err = models.Lookup(e.defaultModel)
-			}
-		}
-	}
-	if err != nil {
-		if uerr, ok := err.(*models.ErrUnknownModel); ok {
-			return nil, models.ModelInfo{}, requestErr(http.StatusBadRequest, uerr.Error())
-		}
-		return nil, models.ModelInfo{}, err
-	}
 	return body, info, nil
 }
 
-// setBodyModel overwrites the model field in an already-translated chat body.
+// resolveModel returns the upstream model name to use, the matching ModelInfo,
+// and the (possibly rewritten) raw payload bytes. If the caller's requested
+// model is unknown and -default-model is set, the raw payload's "model" field
+// is rewritten to the fallback so subsequent translation + normalization see
+// the correct target. The rewrite is logged so misrouted requests are visible
+// in stdout — silent rewrites used to hide Claude Code's "claude-*" builtin
+// names being silently routed away from Kimi and friends.
+func (e *Executor) resolveModel(requested string, payload []byte) (string, models.ModelInfo, []byte, error) {
+	requested = strings.TrimSpace(requested)
+	info, err := models.Lookup(requested)
+	if err == nil {
+		return requested, info, payload, nil
+	}
+	if e.defaultModel == "" {
+		if uerr, ok := err.(*models.ErrUnknownModel); ok {
+			return "", models.ModelInfo{}, nil, requestErr(http.StatusBadRequest, uerr.Error())
+		}
+		return "", models.ModelInfo{}, nil, err
+	}
+	var uerr *models.ErrUnknownModel
+	if !errors.As(err, &uerr) {
+		return "", models.ModelInfo{}, nil, err
+	}
+	rewritten, rerr := setBodyModel(payload, e.defaultModel)
+	if rerr != nil {
+		return "", models.ModelInfo{}, nil, requestErr(http.StatusBadRequest, "invalid json body")
+	}
+	info, err = models.Lookup(e.defaultModel)
+	if err != nil {
+		if uerr2, ok := err.(*models.ErrUnknownModel); ok {
+			return "", models.ModelInfo{}, nil, requestErr(http.StatusBadRequest, uerr2.Error())
+		}
+		return "", models.ModelInfo{}, nil, err
+	}
+	log.Printf("nvidia: default-model rewrite %q -> %q (requested model not in registry; pass -default-model=\"\" to disable, or ensure crawler picked up the model)", requested, e.defaultModel)
+	return e.defaultModel, info, rewritten, nil
+}
+
+// setBodyModel overwrites the model field in a JSON body. Works on both raw
+// (Anthropic/Responses) and translated (OpenAI Chat) shapes since it only
+// touches the top-level "model" key.
 func setBodyModel(body []byte, name string) ([]byte, error) {
 	var raw map[string]any
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -256,10 +288,17 @@ func forceStreamFlag(body []byte, stream bool) ([]byte, error) {
 			opts = map[string]any{}
 			raw["stream_options"] = opts
 		}
+		// include_usage: default true so callers see a final usage chunk.
+		// Callers can pre-set it to false to opt out.
 		if _, ok := opts["include_usage"]; !ok {
 			opts["include_usage"] = true
 		}
-		opts["continuous_usage_stats"] = false
+		// continuous_usage_stats: default false (usage once at end). Some
+		// reasoning models rely on per-delta usage for token accounting —
+		// callers can pre-set this to true; we never overwrite.
+		if _, ok := opts["continuous_usage_stats"]; !ok {
+			opts["continuous_usage_stats"] = false
+		}
 	}
 	return json.Marshal(raw)
 }
